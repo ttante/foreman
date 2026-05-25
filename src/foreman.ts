@@ -74,13 +74,16 @@ the final ticket or step, "blocked" if you cannot proceed without help, and "nee
 if you need the user to make a decision before continuing.`;
 
 /** Instruction sent on the first turn of a batch. */
-export function buildPrimer(n: number): string {
+export function buildPrimer(n: number, trackerPath?: string): string {
+  const trackerRule = trackerPath
+    ? `\n- After completing each ticket or step, update its status in the ticket progress tracker at \`${trackerPath}\`, following the Standard Update Workflow documented in that file.`
+    : "";
   return `You are being run by an automated foreman. We will work through your next ${n} tickets or implementation steps, one per turn.
 
 Rules:
 - Do exactly ONE ticket or step this turn, then stop.
 - ${MARKER_SPEC}
-- If a tool action is denied by foreman policy, do not retry it; report it via the blocked marker.
+- If a tool action is denied by foreman policy, do not retry it; report it via the blocked marker.${trackerRule}
 
 Implement the next ticket or step now.`;
 }
@@ -201,14 +204,14 @@ export class Foreman {
     this.log.write("preflight", { feedback: true, costUsd: result.costUsd });
   }
 
-  async runBatch(n: number): Promise<BatchResult> {
+  async runBatch(n: number, trackerPath?: string): Promise<BatchResult> {
     this.log.write("batch-start", { requested: n, agent: this.builder.agent });
     let completed = 0;
     let outcome: BatchResult["outcome"] = "all-done";
     let detail: string | undefined;
 
     for (let i = 1; i <= n; i++) {
-      const instruction = i === 1 ? buildPrimer(n) : buildNextStepInstruction(i, n);
+      const instruction = i === 1 ? buildPrimer(n, trackerPath) : buildNextStepInstruction(i, n);
       const { result, status } = await this.doTurn(instruction);
 
       this.log.write("step", {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { resolve, join } from "node:path";
+import { resolve, join, relative } from "node:path";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { select, text, isCancel } from "@clack/prompts";
 import { loadConfig } from "./config.js";
@@ -47,12 +47,25 @@ program
     const cwd = resolve(project);
     if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
 
-    // Read ticket file if provided
+    // Locate ticket progress tracker: explicit --tickets > auto-detect standard paths
+    const TRACKER_SEARCH_PATHS = ["docs/ticket-progress.md", "ticket-progress.md"];
     let ticketsContent: string | undefined;
+    let trackerRelPath: string | undefined;
+
     if (opts.tickets) {
       const ticketPath = resolve(opts.tickets as string);
       if (!existsSync(ticketPath)) fail(`ticket file not found: ${ticketPath}`);
       ticketsContent = readFileSync(ticketPath, "utf8");
+      trackerRelPath = relative(cwd, ticketPath);
+    } else {
+      for (const rel of TRACKER_SEARCH_PATHS) {
+        const abs = join(cwd, rel);
+        if (existsSync(abs)) {
+          ticketsContent = readFileSync(abs, "utf8");
+          trackerRelPath = rel;
+          break;
+        }
+      }
     }
 
     // Resolve session ID: explicit --resume beats auto-detect from last log
@@ -87,6 +100,7 @@ program
     ].filter(Boolean).join(" ");
     console.log(`foreman: driving a ${opts.agent} builder through ${steps} step(s)${modifiers ? ` [${modifiers}]` : ""}`);
     console.log(`foreman: project ${cwd}`);
+    if (trackerRelPath) console.log(`foreman: tracker ${trackerRelPath}`);
     console.log(`foreman: log ${logPath}\n`);
 
     const viewer = printEvents(builder.events());
@@ -134,7 +148,7 @@ program
         }
       }
 
-      const result = await foreman.runBatch(steps);
+      const result = await foreman.runBatch(steps, trackerRelPath);
       await builder.close();
       await viewer;
 
