@@ -1,0 +1,31 @@
+{
+  "name": "foreman",
+  "version": "0.1.0",
+  "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended.",
+  "type": "module",
+  "bin": {
+    "foreman": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=10"
+  },
+  "packageManager": "pnpm@10.2.1",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.148",
+    "@clack/prompts": "^1.4.0",
+    "commander": "^12.1.0",
+    "yaml": "^2.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

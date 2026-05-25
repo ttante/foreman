@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nvidia-smi --query-gpu=name,memory.total --format=csv)",
+      "Bash(npm view *)",
+      "Bash(sed -n '188,232p' node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts)",
+      "Bash(sed -n '1949,1990p' node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts)",
+      "Bash(sed -n '3416,3470p' node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts)",
+      "Bash(sed -n '3667,3700p' node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts)",
+      "Bash(awk *)",
+      "Bash(python3 *)",
+      "Bash(timeout 120 node *)",
+      "Bash(node --import tsx/esm src/index.ts --help)",
+      "Bash(node --import tsx/esm src/index.ts start --help)",
+      "Bash(pnpm --version)",
+      "Bash(pnpm install *)",
+      "Bash(pnpm test *)",
+      "WebSearch",
+      "WebFetch(domain:developers.openai.com)",
+      "Bash(codex exec *)",
+      "Bash(pnpm typecheck *)",
+      "Bash(node *)"
+    ]
+  }
+}
