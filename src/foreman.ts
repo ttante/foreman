@@ -65,28 +65,38 @@ export function looksLikeQuestion(text: string): boolean {
 }
 
 const MARKER_SPEC = `End EVERY turn with exactly one marker line as the LAST line, nothing after it:
-  STEP_STATUS: done | summary="what you just did" next="the next step"
+  STEP_STATUS: done | summary="what you just did" next="the next ticket or step"
   STEP_STATUS: blocked | reason="why you cannot proceed"
   STEP_STATUS: plan_complete | summary="what you just did"
   STEP_STATUS: needs_input | question="your question for the user" choices="Option A|Option B|Option C"
-Use "done" after finishing a step when more steps remain, "plan_complete" after
-the final step, "blocked" if you cannot proceed without help, and "needs_input"
+Use "done" after finishing a ticket or step when more remain, "plan_complete" after
+the final ticket or step, "blocked" if you cannot proceed without help, and "needs_input"
 if you need the user to make a decision before continuing.`;
 
 /** Instruction sent on the first turn of a batch. */
 export function buildPrimer(n: number): string {
-  return `You are being run by an automated foreman. We will work through your next ${n} implementation steps, one per turn.
+  return `You are being run by an automated foreman. We will work through your next ${n} tickets or implementation steps, one per turn.
 
 Rules:
-- Do exactly ONE step this turn, then stop.
+- Do exactly ONE ticket or step this turn, then stop.
 - ${MARKER_SPEC}
 - If a tool action is denied by foreman policy, do not retry it; report it via the blocked marker.
 
-Implement the next step now.`;
+Implement the next ticket or step now.`;
 }
 
-/** Instruction sent on every subsequent turn. */
-export const NEXT_STEP_INSTRUCTION = `Implement the next step now (exactly one). Then end with the STEP_STATUS marker line.`;
+/** Instruction sent on turns 2–N. */
+export function buildNextStepInstruction(i: number, n: number): string {
+  return `Implement the next ticket or step now (exactly one) — this is step ${i} of ${n}. Then end with the STEP_STATUS marker line.`;
+}
+
+/** Pre-flight planning turn: ask the builder to list its next N steps without implementing anything. */
+export function buildPlanningTurn(n: number, ticketsContent?: string): string {
+  const header = ticketsContent
+    ? `Here is the project's ticket list:\n\n${ticketsContent}\n\n`
+    : "";
+  return `${header}Before we begin, list the next ${n} ticket(s) or step(s) you plan to implement, in order. Be specific — reference ticket IDs or titles where applicable. Do not implement anything yet; output the numbered list only. Do not emit a STEP_STATUS marker on this turn.`;
+}
 
 /** Builds the permission callback: classify, log, allow or escalate. */
 export function createPermissionHandler(
@@ -174,6 +184,23 @@ export class Foreman {
     return { result, status };
   }
 
+  /** Send a planning turn and return the builder's response text. Does not count toward steps. */
+  async runPreflight(n: number, ticketsContent?: string): Promise<string> {
+    const instruction = buildPlanningTurn(n, ticketsContent);
+    const result = await this.builder.sendTurn(instruction);
+    this.log.write("preflight", {
+      ticketsProvided: ticketsContent !== undefined,
+      costUsd: result.costUsd,
+    });
+    return result.text;
+  }
+
+  /** Send user feedback on the plan; builder responds with a revised list. Does not count toward steps. */
+  async sendPreflightFeedback(feedback: string): Promise<void> {
+    const result = await this.builder.sendTurn(feedback);
+    this.log.write("preflight", { feedback: true, costUsd: result.costUsd });
+  }
+
   async runBatch(n: number): Promise<BatchResult> {
     this.log.write("batch-start", { requested: n, agent: this.builder.agent });
     let completed = 0;
@@ -181,7 +208,7 @@ export class Foreman {
     let detail: string | undefined;
 
     for (let i = 1; i <= n; i++) {
-      const instruction = i === 1 ? buildPrimer(n) : NEXT_STEP_INSTRUCTION;
+      const instruction = i === 1 ? buildPrimer(n) : buildNextStepInstruction(i, n);
       const { result, status } = await this.doTurn(instruction);
 
       this.log.write("step", {
@@ -222,7 +249,7 @@ export class Foreman {
       break;
     }
 
-    this.log.write("batch-end", { completed, requested: n, outcome, detail });
+    this.log.write("batch-end", { completed, requested: n, outcome, detail, sessionId: this.builder.sessionId() });
     return { completed, requested: n, outcome, detail };
   }
 }

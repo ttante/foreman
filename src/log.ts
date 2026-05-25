@@ -11,6 +11,7 @@ export interface LogRecord {
     | "permission"
     | "escalation"
     | "needs_input"
+    | "preflight"
     | "error";
   [key: string]: unknown;
 }

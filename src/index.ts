@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { resolve, join } from "node:path";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { select, text, isCancel } from "@clack/prompts";
 import { loadConfig } from "./config.js";
 import { Log } from "./log.js";
 import { PermissionPolicy } from "./permissions/policy.js";
@@ -24,6 +25,8 @@ program
   .option("-a, --agent <agent>", "builder agent (claude | codex)", "claude")
   .option("-m, --model <model>", "override the builder's model")
   .option("-r, --resume <sessionId>", "resume a prior builder session")
+  .option("-t, --tickets <path>", "path to ticket file (.md, .txt, .yaml, …) — passed to the builder as context")
+  .option("-y, --yes", "skip pre-flight confirmation prompt")
   .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
   .option("--fast", "fast mode — lower latency (maps to effort=low for codex)")
   .action(async (project: string, opts) => {
@@ -44,6 +47,19 @@ program
     const cwd = resolve(project);
     if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
 
+    // Read ticket file if provided
+    let ticketsContent: string | undefined;
+    if (opts.tickets) {
+      const ticketPath = resolve(opts.tickets as string);
+      if (!existsSync(ticketPath)) fail(`ticket file not found: ${ticketPath}`);
+      ticketsContent = readFileSync(ticketPath, "utf8");
+    }
+
+    // Resolve session ID: explicit --resume beats auto-detect from last log
+    const resumeSessionId =
+      (opts.resume as string | undefined) ??
+      findLastSessionId(join(cwd, ".foreman"));
+
     const config = loadConfig(join(cwd, "foreman.yaml"));
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const logPath = join(cwd, ".foreman", `${stamp}.jsonl`);
@@ -53,7 +69,7 @@ program
     const adapterOpts = {
       cwd,
       model: opts.model as string | undefined,
-      resumeSessionId: opts.resume as string | undefined,
+      resumeSessionId,
       permission: createPermissionHandler(policy, log),
       effort: opts.effort as EffortLevel | undefined,
       fast: opts.fast as boolean | undefined,
@@ -76,6 +92,48 @@ program
     const viewer = printEvents(builder.events());
 
     try {
+      // Pre-flight: builder lists the next N tickets or steps; user confirms before any step runs
+      console.log("foreman: asking builder to plan the next tickets or steps...\n");
+      await foreman.runPreflight(steps, ticketsContent);
+
+      if (!opts.yes) {
+        while (true) {
+          console.log();
+          const action = await select({
+            message: "How does this plan look?",
+            options: [
+              { value: "proceed", label: "Proceed — start implementing" },
+              { value: "feedback", label: "Give feedback — revise the plan" },
+              { value: "cancel", label: "Cancel" },
+            ],
+          });
+
+          if (isCancel(action) || action === "cancel") {
+            console.log("foreman: cancelled");
+            await builder.close();
+            await viewer;
+            process.exit(0);
+          }
+          if (action === "proceed") {
+            console.log();
+            break;
+          }
+
+          const fb = await text({
+            message: "Your feedback:",
+            validate: (v) => (v?.trim() ? undefined : "Please enter some feedback"),
+          });
+          if (isCancel(fb)) {
+            console.log("foreman: cancelled");
+            await builder.close();
+            await viewer;
+            process.exit(0);
+          }
+          console.log();
+          await foreman.sendPreflightFeedback(String(fb));
+        }
+      }
+
       const result = await foreman.runBatch(steps);
       await builder.close();
       await viewer;
@@ -136,16 +194,27 @@ program.parseAsync(argv).catch((err) => fail(String(err)));
 
 /** Print a compact live feed of builder activity. */
 async function printEvents(events: AsyncIterable<BuilderEvent>): Promise<void> {
+  let atLineStart = true;
   for await (const ev of events) {
-    if (ev.kind === "tool") {
+    if (ev.kind === "text") {
+      if (ev.text) {
+        process.stdout.write(ev.text);
+        atLineStart = ev.text.endsWith("\n");
+      }
+    } else if (ev.kind === "tool") {
+      if (!atLineStart) { process.stdout.write("\n"); atLineStart = true; }
       console.log(`  → ${ev.name} ${briefInput(ev.input)}`);
     } else if (ev.kind === "turn-complete") {
+      if (!atLineStart) { process.stdout.write("\n"); atLineStart = true; }
       const tag = ev.result.isError ? "turn errored" : "turn complete";
-      console.log(`  · ${tag} ($${ev.result.costUsd.toFixed(4)})`);
+      const cost = ev.result.costUsd > 0 ? ` ($${ev.result.costUsd.toFixed(4)})` : "";
+      console.log(`  · ${tag}${cost}`);
     } else if (ev.kind === "error") {
+      if (!atLineStart) { process.stdout.write("\n"); atLineStart = true; }
       console.log(`  ! error: ${ev.message}`);
     }
   }
+  if (!atLineStart) process.stdout.write("\n");
 }
 
 function briefInput(input: unknown): string {
@@ -160,4 +229,21 @@ function briefInput(input: unknown): string {
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
   process.exit(1);
+}
+
+/** Read the most recent batch-end sessionId from the last .foreman log, for auto-resume. */
+function findLastSessionId(dir: string): string | undefined {
+  if (!existsSync(dir)) return undefined;
+  const logs = readdirSync(dir).filter((f) => f.endsWith(".jsonl")).sort();
+  if (logs.length === 0) return undefined;
+  const lines = readFileSync(join(dir, logs[logs.length - 1]), "utf8")
+    .split("\n")
+    .filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const r = JSON.parse(lines[i]) as Record<string, unknown>;
+    if (r.event === "batch-end" && typeof r.sessionId === "string") {
+      return r.sessionId;
+    }
+  }
+  return undefined;
 }

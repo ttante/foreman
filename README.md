@@ -32,6 +32,10 @@ Foreman does that loop for you. Specify steps, model, reasoning & speed (if appl
 Foreman runs a fixed loop — no LLM, no non-determinism, no surprises:
 
 ```
+pre-flight: "list next N steps"  ──▶  builder lists steps (free turn, no counter)
+                                            ↓
+                                   you confirm the list
+                                            ↓
 turn 1: send primer  ──▶  builder implements step 1  ──▶  STEP_STATUS: done
 turn 2: send "next"  ──▶  builder implements step 2  ──▶  STEP_STATUS: done
 turn 3: send "next"  ──▶  builder has a question     ──▶  STEP_STATUS: needs_input
@@ -44,7 +48,7 @@ turn 4: send answer  ──▶  builder implements step 3  ──▶  STEP_STATU
 turn 5: send "next"  ──▶  builder: all done          ──▶  STEP_STATUS: plan_complete
 ```
 
-`needs_input` turns are free — they don't count against your `--steps` budget.
+The pre-flight turn and `needs_input` turns are free — they don't count against your `--steps` budget.
 
 **What Foreman does with each marker:**
 
@@ -107,8 +111,14 @@ See [Permission policy](#permission-policy) for the default blocklist and how to
 ## Usage
 
 ```bash
-# Claude (default)
+# Claude (default) — shows a plan preview before starting
 pnpm dev -- start ./my-project --steps 20
+
+# Ground the plan in your ticket file
+pnpm dev -- start ./my-project --steps 20 --tickets ./my-project/TICKETS.md
+
+# Skip the confirmation prompt (for scripts / CI)
+pnpm dev -- start ./my-project --steps 20 --tickets ./my-project/TICKETS.md --yes
 
 # Codex
 pnpm dev -- start ./my-project --steps 20 -a codex
@@ -123,7 +133,8 @@ pnpm dev -- start ./my-project --steps 5 --fast
 # Check what the last run did
 pnpm dev -- status ./my-project
 
-# Pick up where you left off
+# Pick up where you left off (auto-detected from last log; --resume overrides)
+pnpm dev -- start ./my-project --steps 10
 pnpm dev -- start ./my-project --steps 10 --resume 794588ed-ec80-4e9c-9536-d023ef2c0464
 ```
 
@@ -133,6 +144,16 @@ pnpm dev -- start ./my-project --steps 10 --resume 794588ed-ec80-4e9c-9536-d023e
 foreman: driving a claude builder through 20 step(s) [model=claude-opus-4-7 effort=high]
 foreman: project /home/tyler/my-project
 foreman: log /home/tyler/my-project/.foreman/2026-05-22T16-35-19Z.jsonl
+
+foreman: asking builder to plan the next steps...
+
+  · turn complete ($0.0041)
+
+1. Add login endpoint (ticket AUTH-1)
+2. Add logout endpoint (ticket AUTH-2)
+...
+
+◆ Proceed with these 20 step(s)? Yes
 
   → Bash pnpm test
   → Edit src/auth/login.ts
@@ -304,7 +325,12 @@ Options:
                                 claude: enables Claude Code's --fast flag
                                 codex:  sets model_reasoning_effort=low (unless
                                         --effort is also given)
-  -r, --resume <id>           resume a prior session (session ID from a previous run)
+  -t, --tickets <path>        path to ticket/task file (.md, .txt, .yaml, …)
+                                content is sent to the builder during the pre-flight
+                                planning turn so it can ground its plan in your tickets
+  -y, --yes                   skip the pre-flight confirmation prompt
+  -r, --resume <id>           resume a specific prior session by ID
+                                omit to auto-resume from the most recent run
 ```
 
 **Exit codes:**
