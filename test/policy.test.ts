@@ -5,6 +5,9 @@ import { DEFAULT_CONFIG } from "../src/config.js";
 import {
   parseStepStatus,
   looksLikeQuestion,
+  buildQaInstruction,
+  buildQaFixInstruction,
+  buildPrimer,
 } from "../src/foreman.js";
 
 const CWD = "/work/project";
@@ -111,4 +114,42 @@ test("looksLikeQuestion detects trailing questions", () => {
   assert.equal(looksLikeQuestion("I did the thing. Should I also update the docs?"), true);
   assert.equal(looksLikeQuestion("Which option do you prefer"), true);
   assert.equal(looksLikeQuestion("Implemented the feature and tests pass."), false);
+});
+
+test("parseStepStatus recognizes qa_pass", () => {
+  const status = parseStepStatus(
+    'all checks green\nSTEP_STATUS: qa_pass | summary="all tests pass, ticket satisfied"',
+  );
+  assert.equal(status.kind, "qa_pass");
+  assert.equal(status.summary, "all tests pass, ticket satisfied");
+});
+
+test("parseStepStatus recognizes qa_fail and extracts issues", () => {
+  const status = parseStepStatus(
+    'STEP_STATUS: qa_fail | issues="missing test for empty-input case; lint warning in src/foo.ts"',
+  );
+  assert.equal(status.kind, "qa_fail");
+  assert.equal(
+    status.issues,
+    "missing test for empty-input case; lint warning in src/foo.ts",
+  );
+});
+
+test("buildQaInstruction includes the QA marker spec", () => {
+  const text = buildQaInstruction();
+  assert.ok(text.includes("STEP_STATUS: qa_pass"));
+  assert.ok(text.includes("STEP_STATUS: qa_fail"));
+  assert.ok(text.includes("Triple-check"));
+});
+
+test("buildQaFixInstruction embeds the reported issues", () => {
+  const text = buildQaFixInstruction("- foo broke\n- bar wrong");
+  assert.ok(text.includes("- foo broke"));
+  assert.ok(text.includes("- bar wrong"));
+  assert.ok(text.includes("STEP_STATUS: done"));
+});
+
+test("buildPrimer anchors turn 1 explicitly to fix off-by-one counting", () => {
+  const text = buildPrimer(5);
+  assert.ok(text.includes("This is step 1 of 5"));
 });

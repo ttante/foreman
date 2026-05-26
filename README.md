@@ -3,7 +3,8 @@
 Stop babysitting your coding agent. Point Foreman at a project, set a step count, walk away.
 
 ```bash
-pnpm dev -- start ./my-project --steps 20
+npm install -g foreman-cli
+foreman start ./my-project --steps 20
 ```
 
 - ✓ Claude Code
@@ -37,7 +38,15 @@ pre-flight: "list next N steps"  ──▶  builder lists steps (free turn, no c
                                    you confirm the list
                                             ↓
 turn 1: send primer  ──▶  builder implements step 1  ──▶  STEP_STATUS: done
+                              ↓
+                     QA turn: "triple-check your work"  ──▶  STEP_STATUS: qa_pass
 turn 2: send "next"  ──▶  builder implements step 2  ──▶  STEP_STATUS: done
+                              ↓
+                     QA turn  ──▶  STEP_STATUS: qa_fail | issues="missing test"
+                              ↓
+                     fix turn  ──▶  builder fixes  ──▶  STEP_STATUS: done
+                              ↓
+                     QA turn  ──▶  STEP_STATUS: qa_pass
 turn 3: send "next"  ──▶  builder has a question     ──▶  STEP_STATUS: needs_input
                               ↓
                      Foreman shows prompt in terminal (+ optional desktop notification)
@@ -48,14 +57,16 @@ turn 4: send answer  ──▶  builder implements step 3  ──▶  STEP_STATU
 turn 5: send "next"  ──▶  builder: all done          ──▶  STEP_STATUS: plan_complete
 ```
 
-The pre-flight turn and `needs_input` turns are free — they don't count against your `--steps` budget.
+The pre-flight turn, QA + fix turns, and `needs_input` turns are all free — they don't count against your `--steps` budget. QA is on by default; pass `--no-qa` (or set `qa.enabled: false` in `foreman.yaml`) to disable it.
 
 **What Foreman does with each marker:**
 
 | Builder ends with | Foreman does |
 |---|---|
-| `STEP_STATUS: done` | log it, send next step |
-| `STEP_STATUS: plan_complete` | log it, stop — plan finished |
+| `STEP_STATUS: done` | run QA pass (if enabled), then send next step |
+| `STEP_STATUS: plan_complete` | run QA pass (if enabled), then stop — plan finished |
+| `STEP_STATUS: qa_pass` | advance counter, send next step |
+| `STEP_STATUS: qa_fail` | send fix instruction, then re-run QA (up to 3 cycles) |
 | `STEP_STATUS: blocked` | stop, report reason |
 | `STEP_STATUS: needs_input` | show choices in terminal, send answer, continue |
 | no marker / question | stop with `needs-human` |
@@ -65,24 +76,41 @@ The pre-flight turn and `needs_input` turns are free — they don't count agains
 **Turn 1 — primer:**
 ```
 You are being run by an automated foreman. We will work through your next N
-implementation steps, one per turn.
+tickets or implementation steps, one per turn.
 
 Rules:
-- Do exactly ONE step this turn, then stop.
+- Do exactly ONE ticket or step this turn, then stop.
 - End EVERY turn with exactly one marker line as the LAST line:
-    STEP_STATUS: done | summary="what you just did" next="the next step"
-    STEP_STATUS: blocked | reason="why you cannot proceed"
-    STEP_STATUS: plan_complete | summary="what you just did"
-    STEP_STATUS: needs_input | question="your question" choices="Option A|Option B|Option C"
+    STEP_STATUS: done | summary="..." next="..."
+    STEP_STATUS: blocked | reason="..."
+    STEP_STATUS: plan_complete | summary="..."
+    STEP_STATUS: needs_input | question="..." choices="..."
 - If a tool action is denied by foreman policy, do not retry it; report it
   via the blocked marker.
 
-Implement the next step now.
+This is step 1 of N. Implement the next ticket or step now.
 ```
 
 **Turn 2–N:**
 ```
-Implement the next step now (exactly one). Then end with the STEP_STATUS marker line.
+Implement the next ticket or step now (exactly one) — this is step i of N.
+Then end with the STEP_STATUS marker line.
+```
+
+**QA turn (after every `done` or `plan_complete`, when QA is enabled):**
+```
+Now QA the ticket or step you just completed. Triple-check your work. Verify:
+- Accuracy, test existence, test execution, ticket satisfaction, confidence.
+- Be skeptical. Do not rubber-stamp.
+
+End with STEP_STATUS: qa_pass or STEP_STATUS: qa_fail | issues="...".
+```
+
+**QA fix turn (after `qa_fail`):**
+```
+Your QA found these issues:
+<issues>
+Fix every one of them now. Then end with STEP_STATUS: done so foreman can re-run QA.
 ```
 
 That's it. Nothing dynamic. The builder drives the plan — Foreman just counts and parses.
@@ -112,30 +140,33 @@ See [Permission policy](#permission-policy) for the default blocklist and how to
 
 ```bash
 # Claude (default) — shows a plan preview before starting
-pnpm dev -- start ./my-project --steps 20
+foreman start ./my-project --steps 20
 
 # Ground the plan in your ticket file
-pnpm dev -- start ./my-project --steps 20 --tickets ./my-project/TICKETS.md
+foreman start ./my-project --steps 20 --tickets ./my-project/TICKETS.md
 
 # Skip the confirmation prompt (for scripts / CI)
-pnpm dev -- start ./my-project --steps 20 --tickets ./my-project/TICKETS.md --yes
+foreman start ./my-project --steps 20 --tickets ./my-project/TICKETS.md --yes
+
+# Disable the per-ticket QA pass (faster but no automatic review)
+foreman start ./my-project --steps 20 --no-qa
 
 # Codex
-pnpm dev -- start ./my-project --steps 20 -a codex
+foreman start ./my-project --steps 20 -a codex
 
 # Override model + reasoning effort
-pnpm dev -- start ./my-project --steps 5 --model claude-opus-4-7 --effort high
-pnpm dev -- start ./my-project --steps 5 -a codex --model gpt-5.3.codex --effort xhigh
+foreman start ./my-project --steps 5 --model claude-opus-4-7 --effort high
+foreman start ./my-project --steps 5 -a codex --model gpt-5.3.codex --effort xhigh
 
 # Lower latency
-pnpm dev -- start ./my-project --steps 5 --fast
+foreman start ./my-project --steps 5 --fast
 
 # Check what the last run did
-pnpm dev -- status ./my-project
+foreman status ./my-project
 
 # Pick up where you left off (auto-detected from last log; --resume overrides)
-pnpm dev -- start ./my-project --steps 10
-pnpm dev -- start ./my-project --steps 10 --resume 794588ed-ec80-4e9c-9536-d023ef2c0464
+foreman start ./my-project --steps 10
+foreman start ./my-project --steps 10 --resume 794588ed-ec80-4e9c-9536-d023ef2c0464
 ```
 
 ### What you'll see
@@ -171,7 +202,20 @@ foreman: resume this builder with  --resume 794588ed-ec80-4e9c-9536-d023ef2c0464
 
 ---
 
-## Setup
+## Install
+
+```bash
+# Global — use `foreman` from anywhere
+npm install -g foreman-cli
+
+# Or per-project
+npm install --save-dev foreman-cli
+npx foreman start ./ --steps 10
+```
+
+Foreman ships a `foreman` binary. Node 20+ is required. The Claude adapter uses your existing Claude Code credentials; the Codex adapter shells out to the `codex` CLI, which must be on your `PATH`.
+
+### Develop (contributors)
 
 ```bash
 # In this repo
@@ -180,9 +224,18 @@ pnpm install
 # Run directly during development
 pnpm dev -- start ./my-project --steps 10
 
-# Or build once and use the bin
+# Or build the bin
 pnpm build
 node dist/index.js start ./my-project --steps 10
+```
+
+### Publish
+
+```bash
+pnpm build && pnpm test && pnpm typecheck
+npm version <patch|minor|major>
+npm publish --access public
+git push --tags
 ```
 
 ---
@@ -289,6 +342,13 @@ notifications:
   # macOS: built-in (osascript). Linux: notify-send. WSL: Windows toast.
   # Default: false.
   enabled: false
+
+qa:
+  # After every STEP_STATUS: done / plan_complete, run a free QA pass:
+  # the builder triple-checks accuracy, tests, and ticket satisfaction.
+  # On qa_fail, foreman drives a fix → re-QA cycle (capped at 3 cycles).
+  # The CLI flag --no-qa overrides this per-run. Default: true.
+  enabled: true
 ```
 
 **Common adjustments:**
@@ -329,6 +389,15 @@ Options:
                                 content is sent to the builder during the pre-flight
                                 planning turn so it can ground its plan in your tickets
   -y, --yes                   skip the pre-flight confirmation prompt
+      --no-qa                 disable the per-ticket QA review pass
+                                QA is enabled by default. After every `done` or
+                                `plan_complete`, foreman asks the builder to
+                                triple-check accuracy, tests, and ticket
+                                satisfaction. On qa_fail, foreman drives a
+                                fix → re-QA loop (capped at 3 cycles). QA turns
+                                are free — they do not count against --steps.
+                                Set `qa.enabled: false` in foreman.yaml to
+                                persist this off for a project.
   -r, --resume <id>           resume a specific prior session by ID
                                 omit to auto-resume from the most recent run
 ```
@@ -380,10 +449,13 @@ Every run writes a JSONL log to `<project>/.foreman/<timestamp>.jsonl`. Each lin
 |---------|---------------|
 | `batch-start` | Run begins |
 | `step` | Each step completes (includes `statusKind`, `summary`, `costUsd`) |
+| `qa` | A QA review turn ran (includes `stepIndex`, `cycle`, `statusKind`, `issues`) |
+| `qa-fix` | A QA fix turn ran (includes `stepIndex`, `cycle`, `statusKind`) |
 | `permission` | Every tool request decided (includes `tool`, `decision`, `reason`) |
 | `escalation` | A tool request was blocked (includes `tool`, `reason`, `input`) |
 | `needs_input` | Builder asked a question (includes `question`, `choices`) |
-| `batch-end` | Run ends (includes `completed`, `requested`, `outcome`, `detail`) |
+| `preflight` | The pre-flight planning or feedback turn ran |
+| `batch-end` | Run ends (includes `completed`, `requested`, `outcome`, `detail`, `sessionId`) |
 | `error` | Something went wrong |
 
 Quick read with `jq`:
@@ -427,11 +499,12 @@ foreman.yaml            # default permission config (copy to your project to ove
 
 ## What's coming
 
-- **Git worktree isolation** — each builder gets its own branch, no collisions
-- **Multi-builder** — run several projects in parallel, one foreman watching all
-- **Escalation UX** — `foreman approve <id>` / `foreman deny <id>` to respond to blocked actions without stopping the run
-- **Resume after crash** — SQLite state so a killed foreman picks up where it left off
-- **Dashboard** — live TUI or web view showing all builders' progress
+- **Multi-repo supervisor** — `foreman supervise manifest.yaml` runs N builders concurrently across different projects, each with its own `.foreman/` log dir and session. The supervisor prints a per-project status line and aggregates exit codes.
+- **Git worktree isolation** — for parallel builders inside one repo, each gets its own worktree on a dedicated branch. Foreman creates the worktree, runs the builder there, and reports the branch for you to merge.
+- **Tracker-row coordination** — when multiple builders share a project, the ticket tracker becomes the contention point. Builders take a lock row in `LLM_NEXT_QUEUE` (set status `in_progress` + owner) during pre-flight so two builders cannot pick the same ticket.
+- **Escalation UX** — `foreman approve <id>` / `foreman deny <id>` to respond to blocked actions without stopping the run.
+- **Resume after crash** — SQLite state so a killed foreman picks up where it left off.
+- **Dashboard** — live TUI or web view showing all builders' progress.
 
 ---
 

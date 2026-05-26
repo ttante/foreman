@@ -17,9 +17,15 @@ export interface NotificationsConfig {
   enabled: boolean;
 }
 
+export interface QaConfig {
+  /** Run a QA review pass after each completed ticket or step. Default: true. */
+  enabled: boolean;
+}
+
 export interface ForemanConfig {
   permissions: PermissionConfig;
   notifications: NotificationsConfig;
+  qa: QaConfig;
 }
 
 /** Built-in defaults; foreman.yaml overrides any field present. */
@@ -86,6 +92,7 @@ export const DEFAULT_CONFIG: ForemanConfig = {
     escalateTools: ["WebFetch", "WebSearch"],
   },
   notifications: { enabled: false },
+  qa: { enabled: true },
 };
 
 /** Load foreman.yaml if present and deep-merge it over the defaults. */
@@ -98,5 +105,6 @@ export function loadConfig(path = "foreman.yaml"): ForemanConfig {
       ...DEFAULT_CONFIG.notifications,
       ...(raw.notifications ?? {}),
     } as NotificationsConfig,
+    qa: { ...DEFAULT_CONFIG.qa, ...(raw.qa ?? {}) } as QaConfig,
   };
 }

@@ -29,6 +29,7 @@ program
   .option("-y, --yes", "skip pre-flight confirmation prompt")
   .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
   .option("--fast", "fast mode — lower latency (maps to effort=low for codex)")
+  .option("--no-qa", "disable per-ticket QA review (enabled by default)")
   .action(async (project: string, opts) => {
     const steps = Number.parseInt(opts.steps, 10);
     if (!Number.isInteger(steps) || steps < 1) {
@@ -91,12 +92,16 @@ program
       opts.agent === "codex"
         ? new CodexAdapter(adapterOpts)
         : new ClaudeAdapter(adapterOpts);
-    const foreman = new Foreman(builder, log, config.notifications.enabled);
+    // Commander surfaces --no-qa as opts.qa === false; when --qa/--no-qa is not
+    // passed, opts.qa is undefined and we fall back to the config default.
+    const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
+    const foreman = new Foreman(builder, log, config.notifications.enabled, qaEnabled);
 
     const modifiers = [
       opts.model ? `model=${opts.model}` : null,
       opts.effort ? `effort=${opts.effort}` : null,
       opts.fast ? "fast" : null,
+      qaEnabled ? null : "qa=off",
     ].filter(Boolean).join(" ");
     console.log(`foreman: driving a ${opts.agent} builder through ${steps} step(s)${modifiers ? ` [${modifiers}]` : ""}`);
     console.log(`foreman: project ${cwd}`);

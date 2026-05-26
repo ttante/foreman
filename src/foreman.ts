@@ -12,12 +12,20 @@ import { fireNotification } from "./notify.js";
 
 /** Parsed STEP_STATUS marker from a builder's turn. */
 export interface StepStatus {
-  kind: "done" | "blocked" | "plan_complete" | "needs_input" | "unknown";
+  kind:
+    | "done"
+    | "blocked"
+    | "plan_complete"
+    | "needs_input"
+    | "qa_pass"
+    | "qa_fail"
+    | "unknown";
   summary?: string;
   next?: string;
   reason?: string;
   question?: string;
   choices?: string[];
+  issues?: string;
 }
 
 /** Phrases that suggest the builder ended its turn by asking the human. */
@@ -37,7 +45,7 @@ const QUESTION_HINTS = [
  */
 export function parseStepStatus(text: string): StepStatus {
   const match = text.match(
-    /STEP_STATUS:\s*(done|blocked|plan_complete|needs_input)\b(.*)$/im,
+    /STEP_STATUS:\s*(done|blocked|plan_complete|needs_input|qa_pass|qa_fail)\b(.*)$/im,
   );
   if (!match) return { kind: "unknown" };
   const kind = match[1].toLowerCase() as StepStatus["kind"];
@@ -51,6 +59,7 @@ export function parseStepStatus(text: string): StepStatus {
     next: fields.next,
     reason: fields.reason,
     question: fields.question,
+    issues: fields.issues,
     choices: fields.choices
       ? fields.choices.split("|").map((c) => c.trim()).filter(Boolean)
       : undefined,
@@ -71,7 +80,15 @@ const MARKER_SPEC = `End EVERY turn with exactly one marker line as the LAST lin
   STEP_STATUS: needs_input | question="your question for the user" choices="Option A|Option B|Option C"
 Use "done" after finishing a ticket or step when more remain, "plan_complete" after
 the final ticket or step, "blocked" if you cannot proceed without help, and "needs_input"
-if you need the user to make a decision before continuing.`;
+if you need the user to make a decision before continuing.
+After "done" or "plan_complete", foreman may run a QA pass on your work — expect a
+follow-up instruction asking you to triple-check accuracy, tests, and ticket satisfaction.`;
+
+const QA_MARKER_SPEC = `End EVERY turn with exactly one marker line as the LAST line, nothing after it:
+  STEP_STATUS: qa_pass | summary="confirmed everything checks out"
+  STEP_STATUS: qa_fail | issues="bullet-list of concrete problems found"
+  STEP_STATUS: blocked | reason="why QA itself cannot proceed"
+  STEP_STATUS: needs_input | question="..." choices="..."`;
 
 /** Instruction sent on the first turn of a batch. */
 export function buildPrimer(n: number, trackerPath?: string): string {
@@ -85,12 +102,38 @@ Rules:
 - ${MARKER_SPEC}
 - If a tool action is denied by foreman policy, do not retry it; report it via the blocked marker.${trackerRule}
 
-Implement the next ticket or step now.`;
+This is step 1 of ${n}. Implement the next ticket or step now.`;
 }
 
 /** Instruction sent on turns 2–N. */
 export function buildNextStepInstruction(i: number, n: number): string {
   return `Implement the next ticket or step now (exactly one) — this is step ${i} of ${n}. Then end with the STEP_STATUS marker line.`;
+}
+
+/** QA review turn: ask the builder to triple-check the ticket or step it just completed. */
+export function buildQaInstruction(): string {
+  return `Now QA the ticket or step you just completed. Triple-check your work. Verify:
+- Accuracy — does the implementation actually do what the ticket describes?
+- Test existence — are there tests covering the new behavior? If tests are expected and missing, that is a QA failure.
+- Test execution — run the test suite (or the relevant subset). Do all tests pass?
+- Ticket satisfaction — are the ticket's acceptance criteria fully met?
+- Confidence — would you bet money this works as described in production?
+
+Triple-check. Do not rubber-stamp your own work. Be skeptical.
+
+If everything is solid, end with STEP_STATUS: qa_pass.
+If anything is off, end with STEP_STATUS: qa_fail and list every concrete issue in the issues="..." field. Do NOT fix issues on this turn — just report them. Foreman will instruct you to fix them next.
+
+${QA_MARKER_SPEC}`;
+}
+
+/** Follow-up turn after qa_fail: have the builder implement the listed fixes. */
+export function buildQaFixInstruction(issues: string): string {
+  return `Your QA found these issues:
+
+${issues}
+
+Fix every one of them now. Then end with STEP_STATUS: done so foreman can re-run QA on the fixes. Triple-check that your fixes actually resolve the issues before emitting done.`;
 }
 
 /** Pre-flight planning turn: ask the builder to list its next N steps without implementing anything. */
@@ -143,6 +186,8 @@ export class Foreman {
     private readonly builder: BuilderAdapter,
     private readonly log: Log,
     private readonly notificationsEnabled = false,
+    private readonly qaEnabled = true,
+    private readonly qaMaxCycles = 3,
   ) {}
 
   /**
@@ -204,6 +249,71 @@ export class Foreman {
     this.log.write("preflight", { feedback: true, costUsd: result.costUsd });
   }
 
+  /**
+   * Run a QA review pass on the ticket the builder just completed.
+   * Loops on qa_fail → fix → re-QA until qa_pass or the cycle cap is reached.
+   * QA turns are free — they do not advance the step counter.
+   */
+  private async runQa(stepIndex: number): Promise<{
+    outcome: "passed" | "blocked" | "needs-human";
+    detail?: string;
+  }> {
+    for (let cycle = 1; cycle <= this.qaMaxCycles; cycle++) {
+      const qa = await this.doTurn(buildQaInstruction());
+      this.log.write("qa", {
+        stepIndex,
+        cycle,
+        statusKind: qa.status.kind,
+        issues: qa.status.issues,
+        costUsd: qa.result.costUsd,
+        isError: qa.result.isError,
+      });
+
+      if (qa.result.isError) {
+        return { outcome: "blocked", detail: `QA turn errored: ${qa.result.text.slice(0, 200)}` };
+      }
+      if (qa.status.kind === "qa_pass") return { outcome: "passed" };
+      if (qa.status.kind === "blocked") {
+        return { outcome: "blocked", detail: qa.status.reason ?? "QA reported blocked" };
+      }
+      if (qa.status.kind !== "qa_fail") {
+        return {
+          outcome: "needs-human",
+          detail: `QA turn did not emit a valid marker (got ${qa.status.kind})`,
+        };
+      }
+
+      const fix = await this.doTurn(
+        buildQaFixInstruction(qa.status.issues ?? "(no issues listed)"),
+      );
+      this.log.write("qa-fix", {
+        stepIndex,
+        cycle,
+        statusKind: fix.status.kind,
+        costUsd: fix.result.costUsd,
+        isError: fix.result.isError,
+      });
+
+      if (fix.result.isError) {
+        return { outcome: "blocked", detail: `QA fix turn errored: ${fix.result.text.slice(0, 200)}` };
+      }
+      if (fix.status.kind === "blocked") {
+        return { outcome: "blocked", detail: fix.status.reason ?? "QA fix reported blocked" };
+      }
+      if (fix.status.kind !== "done") {
+        return {
+          outcome: "needs-human",
+          detail: `QA fix turn did not emit done (got ${fix.status.kind})`,
+        };
+      }
+      // loop back into QA
+    }
+    return {
+      outcome: "needs-human",
+      detail: `QA could not converge after ${this.qaMaxCycles} cycles`,
+    };
+  }
+
   async runBatch(n: number, trackerPath?: string): Promise<BatchResult> {
     this.log.write("batch-start", { requested: n, agent: this.builder.agent });
     let completed = 0;
@@ -229,15 +339,27 @@ export class Foreman {
         detail = `builder turn errored: ${result.text.slice(0, 200)}`;
         break;
       }
-      if (status.kind === "done") {
+      if (status.kind === "done" || status.kind === "plan_complete") {
+        if (this.qaEnabled) {
+          const qa = await this.runQa(i);
+          if (qa.outcome === "blocked") {
+            outcome = "blocked";
+            detail = qa.detail;
+            break;
+          }
+          if (qa.outcome === "needs-human") {
+            outcome = "needs-human";
+            detail = qa.detail;
+            break;
+          }
+        }
         completed++;
+        if (status.kind === "plan_complete") {
+          outcome = "plan-complete";
+          detail = status.summary;
+          break;
+        }
         continue;
-      }
-      if (status.kind === "plan_complete") {
-        completed++;
-        outcome = "plan-complete";
-        detail = status.summary;
-        break;
       }
       if (status.kind === "blocked") {
         outcome = "blocked";

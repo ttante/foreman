@@ -1,17 +1,34 @@
 {
-  "name": "foreman",
-  "version": "0.1.0",
+  "name": "foreman-cli",
+  "version": "0.2.0",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended.",
   "type": "module",
   "bin": {
     "foreman": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "foreman.yaml",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "dev": "tsx src/index.ts",
     "test": "tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm build && pnpm test && pnpm typecheck"
   },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "agent",
+    "orchestrator",
+    "automation",
+    "llm",
+    "cli"
+  ],
   "engines": {
     "node": ">=20",
     "pnpm": ">=10"

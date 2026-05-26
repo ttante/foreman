@@ -12,6 +12,8 @@ export interface LogRecord {
     | "escalation"
     | "needs_input"
     | "preflight"
+    | "qa"
+    | "qa-fix"
     | "error";
   [key: string]: unknown;
 }
