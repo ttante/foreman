@@ -9,6 +9,8 @@ import type {
 import type { PermissionPolicy } from "./permissions/policy.js";
 import type { Log } from "./log.js";
 import { fireNotification } from "./notify.js";
+import { isTicketsInitialized, loadTicketsConfig } from "./tickets/config.js";
+import { cmdUpdate, cmdComplete, cmdBlock, cmdQueue } from "./tickets/commands.js";
 
 /** Parsed STEP_STATUS marker from a builder's turn. */
 export interface StepStatus {
@@ -26,6 +28,7 @@ export interface StepStatus {
   question?: string;
   choices?: string[];
   issues?: string;
+  ticket?: string;
 }
 
 /** Phrases that suggest the builder ended its turn by asking the human. */
@@ -60,6 +63,7 @@ export function parseStepStatus(text: string): StepStatus {
     reason: fields.reason,
     question: fields.question,
     issues: fields.issues,
+    ticket: fields.ticket,
     choices: fields.choices
       ? fields.choices.split("|").map((c) => c.trim()).filter(Boolean)
       : undefined,
@@ -74,13 +78,14 @@ export function looksLikeQuestion(text: string): boolean {
 }
 
 const MARKER_SPEC = `End EVERY turn with exactly one marker line as the LAST line, nothing after it:
-  STEP_STATUS: done | summary="what you just did" next="the next ticket or step"
-  STEP_STATUS: blocked | reason="why you cannot proceed"
-  STEP_STATUS: plan_complete | summary="what you just did"
+  STEP_STATUS: done | ticket="T001" summary="what you just did" next="the next ticket or step"
+  STEP_STATUS: blocked | ticket="T001" reason="why you cannot proceed"
+  STEP_STATUS: plan_complete | ticket="T001" summary="what you just did"
   STEP_STATUS: needs_input | question="your question for the user" choices="Option A|Option B|Option C"
 Use "done" after finishing a ticket or step when more remain, "plan_complete" after
 the final ticket or step, "blocked" if you cannot proceed without help, and "needs_input"
 if you need the user to make a decision before continuing.
+Always include ticket="<ticket-id>" in done/blocked/plan_complete markers when working from a ticket queue.
 After "done" or "plan_complete", foreman may run a QA pass on your work — expect a
 follow-up instruction asking you to triple-check accuracy, tests, and ticket satisfaction.`;
 
@@ -91,10 +96,18 @@ const QA_MARKER_SPEC = `End EVERY turn with exactly one marker line as the LAST 
   STEP_STATUS: needs_input | question="..." choices="..."`;
 
 /** Instruction sent on the first turn of a batch. */
-export function buildPrimer(n: number, trackerPath?: string): string {
-  const trackerRule = trackerPath
-    ? `\n- After completing each ticket or step, update its status in the ticket progress tracker at \`${trackerPath}\`, following the Standard Update Workflow documented in that file.`
-    : "";
+export function buildPrimer(n: number, trackerPath?: string, ticketsEnabled = false): string {
+  let trackerRule: string;
+  if (ticketsEnabled) {
+    trackerRule = `\n- Ticket state is managed by foreman — you do NOT need to manually edit docs/ticket-progress.md.` +
+      `\n- Use \`foreman tickets discover --summary "..." --rationale "..."\` to log newly discovered work.` +
+      `\n- Use \`foreman tickets update <id> --next-action "..."\` to record mid-turn notes.` +
+      `\n- Always include ticket="<id>" in your STEP_STATUS marker so foreman can update the tracker.`;
+  } else if (trackerPath) {
+    trackerRule = `\n- After completing each ticket or step, update its status in the ticket progress tracker at \`${trackerPath}\`, following the Standard Update Workflow documented in that file.`;
+  } else {
+    trackerRule = "";
+  }
   return `You are being run by an automated foreman. We will work through your next ${n} tickets or implementation steps, one per turn.
 
 Rules:
@@ -182,13 +195,18 @@ export interface BatchResult {
 
 /** Drives one builder through a batch of N steps via the STEP_STATUS protocol. */
 export class Foreman {
+  private readonly ticketsEnabled: boolean;
+
   constructor(
     private readonly builder: BuilderAdapter,
     private readonly log: Log,
     private readonly notificationsEnabled = false,
     private readonly qaEnabled = true,
     private readonly qaMaxCycles = 3,
-  ) {}
+    private readonly projectDir?: string,
+  ) {
+    this.ticketsEnabled = !!(projectDir && isTicketsInitialized(projectDir));
+  }
 
   /**
    * Send one instruction and resolve any needs_input exchanges before returning.
@@ -321,7 +339,28 @@ export class Foreman {
     let detail: string | undefined;
 
     for (let i = 1; i <= n; i++) {
-      const instruction = i === 1 ? buildPrimer(n, trackerPath) : buildNextStepInstruction(i, n);
+      // Determine which ticket we're about to work on (for in_progress marking)
+      let pendingTicketId: string | undefined;
+      if (this.ticketsEnabled && this.projectDir) {
+        try {
+          const queue = cmdQueue(this.projectDir);
+          const next = queue.find((r) => r.status === "next");
+          if (next) {
+            pendingTicketId = next.ticket;
+            cmdUpdate(this.projectDir, next.ticket, {
+              status: "in_progress",
+              actor: "foreman",
+              summary: `Starting step ${i} of ${n}`,
+            });
+          }
+        } catch {
+          // Tickets integration failure should not stop the build
+        }
+      }
+
+      const instruction = i === 1
+        ? buildPrimer(n, trackerPath, this.ticketsEnabled)
+        : buildNextStepInstruction(i, n);
       const { result, status } = await this.doTurn(instruction);
 
       this.log.write("step", {
@@ -330,6 +369,7 @@ export class Foreman {
         summary: status.summary,
         next: status.next,
         reason: status.reason,
+        ticket: status.ticket,
         costUsd: result.costUsd,
         isError: result.isError,
       });
@@ -339,7 +379,25 @@ export class Foreman {
         detail = `builder turn errored: ${result.text.slice(0, 200)}`;
         break;
       }
+
       if (status.kind === "done" || status.kind === "plan_complete") {
+        // Update ticket state via the tracker
+        if (this.ticketsEnabled && this.projectDir) {
+          const ticketId = status.ticket ?? pendingTicketId;
+          if (ticketId) {
+            try {
+              cmdComplete(this.projectDir, ticketId, {
+                actor: "foreman",
+                summary: status.summary ?? `Step ${i} complete`,
+                validationResult: "not_run",
+                validationNotes: "QA will follow if enabled",
+              });
+            } catch {
+              // Non-fatal: don't block the build if tracker update fails
+            }
+          }
+        }
+
         if (this.qaEnabled) {
           const qa = await this.runQa(i);
           if (qa.outcome === "blocked") {
@@ -361,11 +419,27 @@ export class Foreman {
         }
         continue;
       }
+
       if (status.kind === "blocked") {
+        // Mark ticket blocked in the tracker
+        if (this.ticketsEnabled && this.projectDir) {
+          const ticketId = status.ticket ?? pendingTicketId;
+          if (ticketId) {
+            try {
+              cmdBlock(this.projectDir, ticketId, {
+                summary: status.reason ?? "builder reported blocked",
+                actor: "foreman",
+              });
+            } catch {
+              // Non-fatal
+            }
+          }
+        }
         outcome = "blocked";
         detail = status.reason ?? "builder reported blocked";
         break;
       }
+
       // No marker: treat as a blocker so we never loop blindly.
       outcome = "needs-human";
       detail = looksLikeQuestion(result.text)

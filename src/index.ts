@@ -10,12 +10,15 @@ import { ClaudeAdapter } from "./adapters/claude.js";
 import { CodexAdapter } from "./adapters/codex.js";
 import { Foreman, createPermissionHandler } from "./foreman.js";
 import type { BuilderAdapter, BuilderEvent, EffortLevel } from "./adapters/types.js";
+import { buildTicketsCommand } from "./cli/tickets.js";
 
 const program = new Command();
 program
   .name("foreman")
   .description("Keep Codex / Claude Code builders moving through their step list.")
   .version("0.1.0");
+
+program.addCommand(buildTicketsCommand());
 
 program
   .command("start")
@@ -95,7 +98,7 @@ program
     // Commander surfaces --no-qa as opts.qa === false; when --qa/--no-qa is not
     // passed, opts.qa is undefined and we fall back to the config default.
     const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
-    const foreman = new Foreman(builder, log, config.notifications.enabled, qaEnabled);
+    const foreman = new Foreman(builder, log, config.notifications.enabled, qaEnabled, 3, cwd);
 
     const modifiers = [
       opts.model ? `model=${opts.model}` : null,

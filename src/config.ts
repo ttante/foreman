@@ -52,6 +52,7 @@ export const DEFAULT_CONFIG: ForemanConfig = {
       "ls",
       "cat ",
       "mkdir ",
+      "foreman tickets",
       "pytest",
       "python ",
       "python3 ",
