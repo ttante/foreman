@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { resolve, join, relative } from "node:path";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { select, text, isCancel } from "@clack/prompts";
 import { loadConfig } from "./config.js";
 import { Log } from "./log.js";
@@ -9,14 +10,21 @@ import { PermissionPolicy } from "./permissions/policy.js";
 import { ClaudeAdapter } from "./adapters/claude.js";
 import { CodexAdapter } from "./adapters/codex.js";
 import { Foreman, createPermissionHandler } from "./foreman.js";
-import type { BuilderAdapter, BuilderEvent, EffortLevel } from "./adapters/types.js";
+import type { BuilderAdapter, EffortLevel } from "./adapters/types.js";
 import { buildTicketsCommand } from "./cli/tickets.js";
+import { printEvents } from "./cli/events.js";
+import { isTicketsInitialized } from "./tickets/config.js";
+import { cmdValidate } from "./tickets/commands.js";
+
+const PACKAGE_VERSION = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+)?.version as string;
 
 const program = new Command();
 program
   .name("foreman")
   .description("Keep Codex / Claude Code builders moving through their step list.")
-  .version("0.1.0");
+  .version(PACKAGE_VERSION);
 
 program.addCommand(buildTicketsCommand());
 
@@ -28,6 +36,7 @@ program
   .option("-a, --agent <agent>", "builder agent (claude | codex)", "claude")
   .option("-m, --model <model>", "override the builder's model")
   .option("-r, --resume <sessionId>", "resume a prior builder session")
+  .option("--continue", "resume the most recent logged session for this project")
   .option("-t, --tickets <path>", "path to ticket file (.md, .txt, .yaml, …) — passed to the builder as context")
   .option("-y, --yes", "skip pre-flight confirmation prompt")
   .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
@@ -72,10 +81,16 @@ program
       }
     }
 
-    // Resolve session ID: explicit --resume beats auto-detect from last log
+    if (opts.resume && opts.continue) {
+      fail("choose either --resume <sessionId> or --continue, not both");
+    }
+
     const resumeSessionId =
       (opts.resume as string | undefined) ??
-      findLastSessionId(join(cwd, ".foreman"));
+      (opts.continue ? findLastSessionId(join(cwd, ".foreman")) : undefined);
+    if (opts.continue && !resumeSessionId) {
+      fail(`no previous session id found under ${join(cwd, ".foreman")}`);
+    }
 
     const config = loadConfig(join(cwd, "foreman.yaml"));
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -208,49 +223,75 @@ program
     }
   });
 
+program
+  .command("doctor")
+  .description("Check Foreman, agent CLIs, config, and optional ticket tracker readiness.")
+  .argument("[project]", "path to the project directory", ".")
+  .action((project: string) => {
+    const cwd = resolve(project);
+    let errors = 0;
+
+    const report = (ok: boolean, label: string, detail?: string): void => {
+      console.log(`${ok ? "ok" : "!!"} ${label}${detail ? ` — ${detail}` : ""}`);
+      if (!ok) errors++;
+    };
+    const warn = (label: string, detail?: string): void => {
+      console.log(`-- ${label}${detail ? ` — ${detail}` : ""}`);
+    };
+
+    report(Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10) >= 20, "node >=20", process.version);
+    report(Boolean(PACKAGE_VERSION), "foreman package version", PACKAGE_VERSION);
+    report(existsSync(cwd), "project directory exists", cwd);
+    if (!existsSync(cwd)) process.exit(1);
+
+    try {
+      loadConfig(join(cwd, "foreman.yaml"));
+      report(true, "foreman.yaml", existsSync(join(cwd, "foreman.yaml")) ? "valid" : "not present, using defaults");
+    } catch (err) {
+      report(false, "foreman.yaml", err instanceof Error ? err.message : String(err));
+    }
+
+    const claude = commandVersion("claude");
+    if (claude.ok) warn("claude CLI found", claude.detail);
+    else warn("claude CLI not found", "Claude adapter may still work through the SDK if credentials are configured");
+
+    const codex = commandVersion("codex");
+    if (codex.ok) warn("codex CLI found", codex.detail);
+    else warn("codex CLI not found", "required only for --agent codex");
+
+    if (isTicketsInitialized(cwd)) {
+      try {
+        const result = cmdValidate(cwd);
+        report(result.clean, ".tickets validation", result.clean ? "clean" : `${result.issues.length} issue(s)`);
+      } catch (err) {
+        report(false, ".tickets validation", err instanceof Error ? err.message : String(err));
+      }
+    } else {
+      warn(".tickets", "not initialized; start will run in plain mode");
+    }
+
+    process.exit(errors === 0 ? 0 : 1);
+  });
+
 // pnpm passes its `--` separator through to the script; strip it so Commander
 // sees the subcommand args correctly.
 const argv = [...process.argv];
 if (argv[2] === "--") argv.splice(2, 1);
 program.parseAsync(argv).catch((err) => fail(String(err)));
 
-/** Print a compact live feed of builder activity. */
-async function printEvents(events: AsyncIterable<BuilderEvent>): Promise<void> {
-  let atLineStart = true;
-  for await (const ev of events) {
-    if (ev.kind === "text") {
-      if (ev.text) {
-        process.stdout.write(ev.text);
-        atLineStart = ev.text.endsWith("\n");
-      }
-    } else if (ev.kind === "tool") {
-      if (!atLineStart) { process.stdout.write("\n"); atLineStart = true; }
-      console.log(`  → ${ev.name} ${briefInput(ev.input)}`);
-    } else if (ev.kind === "turn-complete") {
-      if (!atLineStart) { process.stdout.write("\n"); atLineStart = true; }
-      const tag = ev.result.isError ? "turn errored" : "turn complete";
-      const cost = ev.result.costUsd > 0 ? ` ($${ev.result.costUsd.toFixed(4)})` : "";
-      console.log(`  · ${tag}${cost}`);
-    } else if (ev.kind === "error") {
-      if (!atLineStart) { process.stdout.write("\n"); atLineStart = true; }
-      console.log(`  ! error: ${ev.message}`);
-    }
-  }
-  if (!atLineStart) process.stdout.write("\n");
-}
-
-function briefInput(input: unknown): string {
-  if (input && typeof input === "object") {
-    const o = input as Record<string, unknown>;
-    const key = o.command ?? o.file_path ?? o.path ?? o.pattern ?? "";
-    return String(key).slice(0, 80);
-  }
-  return "";
-}
-
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
   process.exit(1);
+}
+
+function commandVersion(command: string): { ok: boolean; detail?: string } {
+  const result = spawnSync(command, ["--version"], {
+    encoding: "utf8",
+    timeout: 3000,
+  });
+  if (result.error) return { ok: false, detail: result.error.message };
+  if (result.status !== 0) return { ok: false, detail: result.stderr.trim() };
+  return { ok: true, detail: (result.stdout.trim() || result.stderr.trim()).slice(0, 120) };
 }
 
 /** Read the most recent batch-end sessionId from the last .foreman log, for auto-resume. */

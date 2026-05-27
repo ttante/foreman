@@ -12,6 +12,7 @@ export interface LogRecord {
     | "escalation"
     | "needs_input"
     | "preflight"
+    | "ticket-populate"
     | "qa"
     | "qa-fix"
     | "error";

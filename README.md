@@ -1,517 +1,411 @@
 # Foreman
 
-Stop babysitting your coding agent. Point Foreman at a project, set a step count, walk away.
+Run Claude Code or Codex through a project plan without manually typing
+"next step" all day.
+
+## Start Here: Codex + Tickets
+
+Install Foreman, initialize tickets in the project you want Foreman to manage,
+ask Codex to populate the ticket file, then run Foreman against that project:
 
 ```bash
 npm install -g foreman-cli
-foreman start ./my-project --steps 20
+
+foreman doctor ../my-project
+foreman tickets init --project ../my-project --app-name "My App"
+foreman tickets populate --project ../my-project --agent codex --model gpt-5.5 --effort xhigh
+foreman start ../my-project --agent codex --model gpt-5.5 --effort xhigh --steps 5
 ```
 
-- ✓ Claude Code
-- ✓ Codex CLI
+`../my-project` is the repo Foreman will work on. `tickets init` creates the
+local `.tickets/` tracker, `tickets populate` asks Codex to convert existing
+plans, TODOs, roadmap docs, and ticket files into Foreman's schema, and `start`
+drives Codex through the next tickets one step at a time.
 
-Requires Node 20+. Desktop notifications available (macOS, Linux, WSL) — off by default, one line to enable.
+`--model gpt-5.5` selects the builder model. `--effort xhigh` sets the
+reasoning level for agents that support it. Both options work with
+`tickets populate` and `start`.
 
----
+Use `--yes` with `populate` or `start` when you want to skip confirmation
+prompts in a scripted workflow.
 
-## The problem
+## Install Options
 
-Your agent has a plan. Implementing it looks like:
-
-```
-you:   what's the next thing to implement?
-agent: ticket #XXX
-you:   implement it
-(repeat all day)
-...
-```
-
-Foreman does that loop for you. Specify steps, model, reasoning & speed (if applicable).
-
-## How it works
-
-Foreman runs a fixed loop — no LLM, no non-determinism, no surprises:
-
-```
-pre-flight: "list next N steps"  ──▶  builder lists steps (free turn, no counter)
-                                            ↓
-                                   you confirm the list
-                                            ↓
-turn 1: send primer  ──▶  builder implements step 1  ──▶  STEP_STATUS: done
-                              ↓
-                     QA turn: "triple-check your work"  ──▶  STEP_STATUS: qa_pass
-turn 2: send "next"  ──▶  builder implements step 2  ──▶  STEP_STATUS: done
-                              ↓
-                     QA turn  ──▶  STEP_STATUS: qa_fail | issues="missing test"
-                              ↓
-                     fix turn  ──▶  builder fixes  ──▶  STEP_STATUS: done
-                              ↓
-                     QA turn  ──▶  STEP_STATUS: qa_pass
-turn 3: send "next"  ──▶  builder has a question     ──▶  STEP_STATUS: needs_input
-                              ↓
-                     Foreman shows prompt in terminal (+ optional desktop notification)
-                              ↓
-                     you pick an answer
-                              ↓
-turn 4: send answer  ──▶  builder implements step 3  ──▶  STEP_STATUS: done
-turn 5: send "next"  ──▶  builder: all done          ──▶  STEP_STATUS: plan_complete
-```
-
-The pre-flight turn, QA + fix turns, and `needs_input` turns are all free — they don't count against your `--steps` budget. QA is on by default; pass `--no-qa` (or set `qa.enabled: false` in `foreman.yaml`) to disable it.
-
-**What Foreman does with each marker:**
-
-| Builder ends with | Foreman does |
-|---|---|
-| `STEP_STATUS: done` | run QA pass (if enabled), then send next step |
-| `STEP_STATUS: plan_complete` | run QA pass (if enabled), then stop — plan finished |
-| `STEP_STATUS: qa_pass` | advance counter, send next step |
-| `STEP_STATUS: qa_fail` | send fix instruction, then re-run QA (up to 3 cycles) |
-| `STEP_STATUS: blocked` | stop, report reason |
-| `STEP_STATUS: needs_input` | show choices in terminal, send answer, continue |
-| no marker / question | stop with `needs-human` |
-
-### The exact prompts (static strings, not generated)
-
-**Turn 1 — primer:**
-```
-You are being run by an automated foreman. We will work through your next N
-tickets or implementation steps, one per turn.
-
-Rules:
-- Do exactly ONE ticket or step this turn, then stop.
-- End EVERY turn with exactly one marker line as the LAST line:
-    STEP_STATUS: done | summary="..." next="..."
-    STEP_STATUS: blocked | reason="..."
-    STEP_STATUS: plan_complete | summary="..."
-    STEP_STATUS: needs_input | question="..." choices="..."
-- If a tool action is denied by foreman policy, do not retry it; report it
-  via the blocked marker.
-
-This is step 1 of N. Implement the next ticket or step now.
-```
-
-**Turn 2–N:**
-```
-Implement the next ticket or step now (exactly one) — this is step i of N.
-Then end with the STEP_STATUS marker line.
-```
-
-**QA turn (after every `done` or `plan_complete`, when QA is enabled):**
-```
-Now QA the ticket or step you just completed. Triple-check your work. Verify:
-- Accuracy, test existence, test execution, ticket satisfaction, confidence.
-- Be skeptical. Do not rubber-stamp.
-
-End with STEP_STATUS: qa_pass or STEP_STATUS: qa_fail | issues="...".
-```
-
-**QA fix turn (after `qa_fail`):**
-```
-Your QA found these issues:
-<issues>
-Fix every one of them now. Then end with STEP_STATUS: done so foreman can re-run QA.
-```
-
-That's it. Nothing dynamic. The builder drives the plan — Foreman just counts and parses.
-
-### What the builder can and can't do
-
-Every tool call the builder makes is intercepted before it executes. The policy is pure rules — no LLM judgment involved:
-
-```
-tool request
-    │
-    ├─ in escalateTools list?           → BLOCK  (e.g. WebFetch, WebSearch)
-    ├─ Bash containing blocked pattern? → BLOCK  (e.g. git push, rm -rf, curl)
-    ├─ file write outside project dir?  → BLOCK
-    ├─ file op in allowTools list?      → allow
-    ├─ Bash with no blocked pattern?    → allow
-    └─ anything else / unrecognized?    → BLOCK  (fail-safe)
-```
-
-Blocked commands are never executed. The builder is told what was blocked and asked to emit `STEP_STATUS: blocked` — Foreman stops the batch and reports it to you.
-
-See [Permission policy](#permission-policy) for the default blocklist and how to override it per-project with `foreman.yaml`.
-
----
-
-## Usage
+Global install is best for personal use:
 
 ```bash
-# Claude (default) — shows a plan preview before starting
-foreman start ./my-project --steps 20
+npm install -g foreman-cli
+```
 
-# Ground the plan in your ticket file
-foreman start ./my-project --steps 20 --tickets ./my-project/TICKETS.md
+Per-project install is best when a repo wants a pinned Foreman version:
 
-# Skip the confirmation prompt (for scripts / CI)
-foreman start ./my-project --steps 20 --tickets ./my-project/TICKETS.md --yes
+```bash
+npm install --save-dev foreman-cli
+npx foreman doctor .
+```
 
-# Disable the per-ticket QA pass (faster but no automatic review)
-foreman start ./my-project --steps 20 --no-qa
+Requires Node.js 20 or newer.
+
+## What Foreman Does
+
+Foreman asks the builder for a short plan, sends one implementation step at a
+time, requires a final `STEP_STATUS` marker, optionally runs QA after each step,
+and writes a JSONL log under `.foreman/`.
+
+Foreman can run in two modes:
+
+- **Plain mode**: use any project or task file.
+- **Ticket mode**: initialize `.tickets/` in the project and let Foreman keep a
+  deterministic local ticket queue.
+
+## Agent Examples
+
+### Claude Code
+
+```bash
+foreman doctor ./my-project
+foreman start ./my-project --steps 5
+```
+
+Claude is the default agent. The Claude adapter uses your existing Claude Code
+credentials through the Claude Agent SDK.
+
+### Codex
+
+```bash
+foreman doctor ./my-project
+foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 5
+```
+
+The Codex adapter shells out to `codex exec`, so the `codex` CLI must be on
+your `PATH`.
+
+### With A Task File
+
+```bash
+foreman start ./my-project --steps 5 --tickets ./my-project/TICKETS.md
+```
+
+`--tickets` can point at Markdown, text, YAML, or any file you want sent to the
+builder during the preflight planning turn.
+
+## Ticket Mode Setup
+
+Ticket mode is optional. Use it when you want the repo itself to contain the
+canonical implementation order and generated agent-facing progress document.
+
+### 1. Initialize Tickets
+
+From anywhere:
+
+```bash
+foreman tickets init --project ./my-project --app-name "My App"
+```
+
+Or, from inside the project:
+
+```bash
+foreman tickets init --app-name "My App"
+```
+
+This creates:
+
+```txt
+.tickets/
+  config.yaml
+  tickets.yaml
+  tracker-rules.md
+  ticket-state.sqlite
+  schema/
+  migrations/
+  backups/
+docs/
+  ticket-progress.md
+```
+
+### 2. Add Tickets
+
+If the project already has tickets, plans, TODOs, roadmap docs, or a Markdown
+tracker, ask a builder to convert them into Foreman's ticket format:
+
+```bash
+# Claude Code
+foreman tickets populate --project ./my-project
 
 # Codex
-foreman start ./my-project --steps 20 -a codex
-
-# Override model + reasoning effort
-foreman start ./my-project --steps 5 --model claude-opus-4-7 --effort high
-foreman start ./my-project --steps 5 -a codex --model gpt-5.3.codex --effort xhigh
-
-# Lower latency
-foreman start ./my-project --steps 5 --fast
-
-# Check what the last run did
-foreman status ./my-project
-
-# Pick up where you left off (auto-detected from last log; --resume overrides)
-foreman start ./my-project --steps 10
-foreman start ./my-project --steps 10 --resume 794588ed-ec80-4e9c-9536-d023ef2c0464
+foreman tickets populate --project ./my-project --agent codex
+foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
 ```
 
-### What you'll see
+`populate` tells the builder to read `.tickets/*`, `docs/ticket-progress.md`,
+and existing planning files, then fill `.tickets/tickets.yaml`, render the
+progress doc, and validate the result. If the existing content does not map
+cleanly to Foreman's schema, the builder should ask you for guidance.
 
-```
-foreman: driving a claude builder through 20 step(s) [model=claude-opus-4-7 effort=high]
-foreman: project /home/tyler/my-project
-foreman: log /home/tyler/my-project/.foreman/2026-05-22T16-35-19Z.jsonl
+You can also edit `.tickets/tickets.yaml` manually. Ticket definitions live in
+YAML; mutable status lives in SQLite and is changed by `foreman tickets`
+commands.
 
-foreman: asking builder to plan the next steps...
-
-  · turn complete ($0.0041)
-
-1. Add login endpoint (ticket AUTH-1)
-2. Add logout endpoint (ticket AUTH-2)
-...
-
-◆ Proceed with these 20 step(s)? Yes
-
-  → Bash pnpm test
-  → Edit src/auth/login.ts
-  → Write src/auth/logout.ts
-  · turn complete ($0.0566)
-  → Edit src/auth/middleware.ts
-  → Bash pnpm test
-  · turn complete ($0.0691)
-  ...
-
-foreman: 20/20 step(s) completed
-foreman: outcome — all-done
-foreman: resume this builder with  --resume 794588ed-ec80-4e9c-9536-d023ef2c0464
-```
-
----
-
-## Install
-
-```bash
-# Global — use `foreman` from anywhere
-npm install -g foreman-cli
-
-# Or per-project
-npm install --save-dev foreman-cli
-npx foreman start ./ --steps 10
-```
-
-Foreman ships a `foreman` binary. Node 20+ is required. The Claude adapter uses your existing Claude Code credentials; the Codex adapter shells out to the `codex` CLI, which must be on your `PATH`.
-
-### Develop (contributors)
-
-```bash
-# In this repo
-pnpm install
-
-# Run directly during development
-pnpm dev -- start ./my-project --steps 10
-
-# Or build the bin
-pnpm build
-node dist/index.js start ./my-project --steps 10
-```
-
-### Publish
-
-```bash
-pnpm build && pnpm test && pnpm typecheck
-npm version <patch|minor|major>
-npm publish --access public
-git push --tags
-```
-
----
-
-## How the builder knows what to do
-
-Foreman does **not** manage a ticket database. The builder already knows its plan — Foreman just tells it "do the next step" repeatedly.
-
-At the start of each batch, Foreman sends the builder a primer that sets the rules for the session:
-
-> *"Do exactly ONE step per turn. End every turn with a STEP_STATUS marker line..."*
-
-After each step, the builder must end its message with one of these marker lines:
-
-```
-STEP_STATUS: done | summary="added login endpoint" next="add logout endpoint"
-STEP_STATUS: blocked | reason="DATABASE_URL env var not set"
-STEP_STATUS: plan_complete | summary="all auth endpoints implemented"
-```
-
-Foreman parses these to decide what to do next:
-
-| Marker | Foreman action |
-|--------|----------------|
-| `done` | Log the step, send "next step" |
-| `plan_complete` | Log the step, finish the batch |
-| `blocked` | Stop the batch, report the reason |
-| *(no marker)* | Treat as blocked — logs "builder did not emit a STEP_STATUS marker" |
-
-If you're asking the builder for its plan before running Foreman, ask it to **use that exact format** for its steps, or tell it at the start of a session:
-
-> *"When I say 'go', implement your steps one at a time and end each turn with `STEP_STATUS: done/blocked/plan_complete`."*
-
----
-
-## Permission policy
-
-Foreman intercepts every tool request and decides: **allow automatically** or **block**.
-
-### What gets auto-allowed
-- All file reads (anywhere)
-- All file writes and edits (auto-approved — the worker can freely edit files in the project)
-- Any Bash command that doesn't contain a blocked pattern
-
-### What gets blocked
-Any Bash command that contains a substring from the `escalateBash` list — checked against the **full command string**, including chained commands. If `git push` is in the list and the worker runs `npm run build && git push`, it's blocked.
-
-Non-Bash tools in `escalateTools` (like `WebFetch`) are always blocked regardless of input.
-
-When something is blocked, the worker is told to emit `STEP_STATUS: blocked` with a reason. Foreman stops the batch and reports it.
-
-### `foreman.yaml` — what it is and where it comes from
-
-**`foreman.yaml` is a config file specific to this project — not a standard or third-party thing.** We created it. There's nothing magic about the name; it's just what Foreman looks for.
-
-The defaults are baked into `src/config.ts`. The `foreman.yaml` in the root of this repo documents those defaults and serves as a copy-paste template. You don't need one at all unless you want to override something.
-
-To use it: drop a `foreman.yaml` into whichever project you're running Foreman against. Foreman reads it from the **project directory** (the path you pass to `start`), so each project can have its own policy. If no file is found, the built-in defaults apply.
-
-### Full example `foreman.yaml`
-
-This is the complete file with every field documented. Copy it into a project and edit from there:
+Minimal valid example:
 
 ```yaml
-permissions:
+tickets:
+  - id: T001
+    order: 1000
+    title: Add health check command
+    area: CLI
+    priority: P1
+    size: S
+    risk: Low
+    depends_on: []
+    summary: Add a command that reports whether Foreman is configured correctly.
+    acceptance:
+      - The command exits 0 when required local checks pass.
+      - The command prints actionable warnings for optional missing tools.
+    required_tests:
+      - Unit test for success output
+      - Unit test for missing optional tools
+    likely_files:
+      - src/index.ts
+      - test/*.test.ts
+    rollback: null
+    notes: null
 
-  # Bash: a command is BLOCKED if its full text contains any of these substrings.
-  # Checked against the entire command string including chained parts (&&, ||, ;, |).
-  # To unblock something (e.g. curl for a project that needs it), remove it from this list.
-  escalateBash:
-    - rm -rf
-    - rm -r
-    - sudo
-    - git push
-    - git reset --hard
-    - git clean
-    - curl
-    - wget
-    - ssh
-    - scp
-    - docker
-    - kubectl
-    - chmod 777
-
-  # Non-Bash tools that are ALWAYS blocked (network access tools).
-  escalateTools:
-    - WebFetch
-    - WebSearch
-
-  # Non-Bash tools that are always allowed.
-  # File writes/edits in this list are further restricted to inside the project dir.
-  allowTools:
-    - Read
-    - Glob
-    - Grep
-    - Edit
-    - Write
-    - MultiEdit
-    - NotebookEdit
-    - TodoWrite
-
-notifications:
-  # Fire a desktop notification when the builder needs your input.
-  # macOS: built-in (osascript). Linux: notify-send. WSL: Windows toast.
-  # Default: false.
-  enabled: false
-
-qa:
-  # After every STEP_STATUS: done / plan_complete, run a free QA pass:
-  # the builder triple-checks accuracy, tests, and ticket satisfaction.
-  # On qa_fail, foreman drives a fix → re-QA cycle (capped at 3 cycles).
-  # The CLI flag --no-qa overrides this per-run. Default: true.
-  enabled: true
+  - id: T002
+    order: 2000
+    title: Document health check command
+    area: Docs
+    priority: P2
+    size: XS
+    risk: Low
+    depends_on:
+      - T001
+    summary: Add README examples for the health check command.
+    acceptance:
+      - README shows the command in the quick start.
+    required_tests:
+      - Documentation review
+    likely_files:
+      - README.md
+    rollback: Revert the README section.
+    notes: null
 ```
 
-**Common adjustments:**
+Ticket fields Foreman expects:
 
-| Scenario | Change |
-|----------|--------|
-| Project needs to make HTTP requests | Remove `curl` and `wget` from `escalateBash` |
-| Want to prevent any git commits | Add `git commit` to `escalateBash` |
-| Project uses Docker in its test suite | Remove `docker` from `escalateBash` |
-| Lock down to read-only (no file writes) | Remove `Edit`, `Write`, `MultiEdit` from `allowTools` |
+| Field | Required | Notes |
+| --- | --- | --- |
+| `id` | yes | Stable ticket ID, unique within the file. |
+| `order` | yes | Unique implementation order. Use gaps like `1000`, `2000`. |
+| `title` | yes | Short human-readable title. |
+| `area` | yes | Product or code area. |
+| `priority` | yes | `P0`, `P1`, `P2`, or `P3`. |
+| `size` | yes | `XS`, `S`, `M`, `L`, or `XL`. |
+| `risk` | yes | `Low`, `Medium`, or `High`. |
+| `depends_on` | yes | Array of ticket IDs. Empty array is fine. |
+| `summary` | yes | Short implementation summary. |
+| `acceptance` | yes | Non-empty list of completion criteria. |
+| `required_tests` | yes | Non-empty list of expected validation. |
+| `likely_files` | yes | Expected files or globs. Empty only when unknown. |
+| `rollback` | required for Medium/High risk | Rollback or mitigation notes. |
+| `notes` | optional | Extra context. |
 
----
+Do not put status fields in `.tickets/tickets.yaml`. These belong in
+`.tickets/ticket-state.sqlite`:
 
-## CLI reference
-
-### `foreman start`
-
-```
-foreman start <project> --steps <n> [options]
-
-Arguments:
-  project               path to the project the builder works in
-
-Options:
-  -s, --steps <n>             how many steps to drive (required)
-  -a, --agent <agent>         builder agent: claude (default) | codex
-  -m, --model <model>         override the model
-                                claude: claude-opus-4-7, claude-sonnet-4-6, …
-                                codex:  gpt-5.4, gpt-5.3.codex, gpt-5.4-mini, …
-      --effort <level>        reasoning effort: low | medium | high | xhigh
-                                claude maps this to its native effort levels
-                                codex maps this to model_reasoning_effort config
-      --fast                  fast mode — lower latency
-                                claude: enables Claude Code's --fast flag
-                                codex:  sets model_reasoning_effort=low (unless
-                                        --effort is also given)
-  -t, --tickets <path>        path to ticket/task file (.md, .txt, .yaml, …)
-                                content is sent to the builder during the pre-flight
-                                planning turn so it can ground its plan in your tickets
-  -y, --yes                   skip the pre-flight confirmation prompt
-      --no-qa                 disable the per-ticket QA review pass
-                                QA is enabled by default. After every `done` or
-                                `plan_complete`, foreman asks the builder to
-                                triple-check accuracy, tests, and ticket
-                                satisfaction. On qa_fail, foreman drives a
-                                fix → re-QA loop (capped at 3 cycles). QA turns
-                                are free — they do not count against --steps.
-                                Set `qa.enabled: false` in foreman.yaml to
-                                persist this off for a project.
-  -r, --resume <id>           resume a specific prior session by ID
-                                omit to auto-resume from the most recent run
+```txt
+status
+last_worked_at
+completed_at
+attempt_count
+last_error
+evidence
+current_step
+blocked_by
+validation_result
 ```
 
-**Exit codes:**
-- `0` — all steps completed or plan finished cleanly
-- `1` — error (bad args, no project dir, SDK failure)
-- `2` — batch ended with `needs-human` (builder asked a question instead of emitting a marker)
-
-### `foreman status`
-
-```
-foreman status <project>
-```
-
-Reads the most recent `.foreman/*.jsonl` log in the project and prints a summary:
-
-```
-foreman: latest run 2026-05-22T16-35-19Z.jsonl
-foreman: 20 step record(s), 0 escalation(s)
-foreman: outcome — all-done (20/20)
-```
-
----
-
-## Session resume
-
-Every run prints a session ID at the end:
-
-```
-foreman: resume this builder with  --resume 794588ed-ec80-4e9c-9536-d023ef2c0464
-```
-
-Pass that ID to continue in the same context — the builder remembers what it's done:
+### 3. Validate And Render
 
 ```bash
-foreman start ./my-project --steps 20 --resume 794588ed-ec80-4e9c-9536-d023ef2c0464
+foreman tickets validate --project ./my-project
+foreman tickets render --project ./my-project
+foreman tickets queue --project ./my-project
 ```
 
-For Claude, sessions are stored in `~/.claude/projects/`. For Codex, sessions are stored in `~/.codex/`. Both persist until you clear them.
+`docs/ticket-progress.md` is generated from `.tickets/tickets.yaml` and
+`.tickets/ticket-state.sqlite`. Builders should read it, but you should not
+manually edit generated sections.
 
----
+### 4. Run Foreman
 
-## Logs
-
-Every run writes a JSONL log to `<project>/.foreman/<timestamp>.jsonl`. Each line is a JSON record:
-
-| `event` | When it fires |
-|---------|---------------|
-| `batch-start` | Run begins |
-| `step` | Each step completes (includes `statusKind`, `summary`, `costUsd`) |
-| `qa` | A QA review turn ran (includes `stepIndex`, `cycle`, `statusKind`, `issues`) |
-| `qa-fix` | A QA fix turn ran (includes `stepIndex`, `cycle`, `statusKind`) |
-| `permission` | Every tool request decided (includes `tool`, `decision`, `reason`) |
-| `escalation` | A tool request was blocked (includes `tool`, `reason`, `input`) |
-| `needs_input` | Builder asked a question (includes `question`, `choices`) |
-| `preflight` | The pre-flight planning or feedback turn ran |
-| `batch-end` | Run ends (includes `completed`, `requested`, `outcome`, `detail`, `sessionId`) |
-| `error` | Something went wrong |
-
-Quick read with `jq`:
+Claude Code:
 
 ```bash
-# All step summaries from the last run
-cat .foreman/*.jsonl | jq 'select(.event=="step") | {i: .index, status: .statusKind, s: .summary}'
-
-# Any escalations
-cat .foreman/*.jsonl | jq 'select(.event=="escalation")'
-
-# Total API cost
-cat .foreman/*.jsonl | jq 'select(.event=="step") | .costUsd' | paste -sd+ | bc
+foreman start ./my-project --steps 10
 ```
 
----
+Codex:
 
-## Project layout
-
-```
-src/
-  index.ts              # CLI (start / status)
-  foreman.ts            # step-loop controller, STEP_STATUS parser, permission handler
-  config.ts             # load + merge foreman.yaml
-  log.ts                # append-only JSONL logger
-  adapters/
-    types.ts            # BuilderAdapter interface + EffortLevel type
-    claude.ts           # Claude Agent SDK implementation
-    codex.ts            # Codex CLI subprocess implementation
-  permissions/
-    policy.ts           # rules-based allow/escalate classifier
-  util/
-    asyncQueue.ts       # async iterable queue (SDK streaming input)
-test/
-  policy.test.ts        # permission policy + STEP_STATUS parsing unit tests
-  codex.test.ts         # CodexAdapter arg construction + JSONL parsing unit tests
-foreman.yaml            # default permission config (copy to your project to override)
+```bash
+foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 10
 ```
 
----
+When `.tickets/config.yaml` exists, Foreman automatically runs in ticket mode.
+It marks the first eligible queue row `in_progress`, drives one step, runs QA
+if enabled, and marks the ticket `done` only after QA passes.
 
-## What's coming
+## Common Commands
 
-- **Multi-repo supervisor** — `foreman supervise manifest.yaml` runs N builders concurrently across different projects, each with its own `.foreman/` log dir and session. The supervisor prints a per-project status line and aggregates exit codes.
-- **Git worktree isolation** — for parallel builders inside one repo, each gets its own worktree on a dedicated branch. Foreman creates the worktree, runs the builder there, and reports the branch for you to merge.
-- **Tracker-row coordination** — when multiple builders share a project, the ticket tracker becomes the contention point. Builders take a lock row in `LLM_NEXT_QUEUE` (set status `in_progress` + owner) during pre-flight so two builders cannot pick the same ticket.
-- **Escalation UX** — `foreman approve <id>` / `foreman deny <id>` to respond to blocked actions without stopping the run.
-- **Resume after crash** — SQLite state so a killed foreman picks up where it left off.
-- **Dashboard** — live TUI or web view showing all builders' progress.
+```bash
+# Check environment and config
+foreman doctor ./my-project
 
----
+# Start fresh with Claude
+foreman start ./my-project --steps 5
 
-## Limitations
+# Start fresh with Codex
+foreman start ./my-project --agent codex --steps 5
 
-- **One builder at a time** — multi-builder is not yet supported
-- **No daemon** — `start` runs in the foreground; stop with Ctrl-C
-- **Codex tool calls are not intercepted** — the permission policy applies to Claude only; Codex manages its own sandboxing via `--sandbox workspace-write`
-- **File writes outside the project directory are not blocked for Claude** — current `acceptEdits` mode auto-approves all file ops
-- **Escalated Bash commands block the step** — there's no interactive approve/deny yet; the builder reports `blocked` and you resume manually
+# Start Codex with a specific model and reasoning level
+foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 5
+
+# Skip the preflight confirmation prompt
+foreman start ./my-project --steps 5 --yes
+
+# Disable per-step QA
+foreman start ./my-project --steps 5 --no-qa
+
+# Resume the latest logged session
+foreman start ./my-project --steps 5 --continue
+
+# Resume a specific session
+foreman start ./my-project --steps 5 --resume <session-id>
+
+# Show the latest run summary
+foreman status ./my-project
+
+# Show the next ticket queue
+foreman tickets queue --project ./my-project
+```
+
+## Common Options
+
+| Option | Example | Description |
+| --- | --- | --- |
+| `--steps <n>` | `--steps 10` | Number of implementation steps to drive. Required. |
+| `--agent <agent>` | `--agent codex` | `claude` by default, or `codex`. |
+| `--tickets <path>` | `--tickets TICKETS.md` | Send a task file into preflight planning. |
+| `--yes` | `--yes` | Skip preflight confirmation. Useful for scripts. |
+| `--no-qa` | `--no-qa` | Disable QA pass after each completed step. |
+| `--continue` | `--continue` | Resume the most recent session logged in `.foreman/`. |
+| `--resume <id>` | `--resume abc123` | Resume a specific Claude/Codex session. |
+| `--model <model>` | `--model gpt-5.5` | Override the agent model. |
+| `--effort <level>` | `--effort xhigh` | Reasoning level: `low`, `medium`, `high`, `xhigh`. |
+| `--fast` | `--fast` | Lower-latency mode where supported. |
+
+## Ticket Commands
+
+```bash
+# Initialize ticket mode
+foreman tickets init --project ./my-project --app-name "My App"
+
+# Ask Claude/Codex to populate .tickets/tickets.yaml from existing project docs
+foreman tickets populate --project ./my-project
+foreman tickets populate --project ./my-project --agent codex
+foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
+
+# Validate ticket definitions, state, queue, and generated document
+foreman tickets validate --project ./my-project
+
+# Regenerate docs/ticket-progress.md
+foreman tickets render --project ./my-project
+
+# Print the current queue
+foreman tickets queue --project ./my-project
+
+# Update a ticket note or status
+foreman tickets update T001 --project ./my-project --next-action "Add tests"
+
+# Mark a ticket complete manually
+foreman tickets complete T001 --project ./my-project --evidence "pnpm test passed"
+
+# Block or unblock work
+foreman tickets block T001 --project ./my-project --blocked-by external-api --summary "Waiting on API key"
+foreman tickets unblock T001 --project ./my-project --summary "API key received"
+
+# Capture future work discovered during implementation
+foreman tickets discover --project ./my-project --summary "Add retry metrics" --rationale "Needed for operations"
+```
+
+`foreman tickets import` exists as a placeholder and is not implemented yet.
+
+## How The Loop Works
+
+Before implementation starts, Foreman asks the builder to list the next `N`
+steps. Unless `--yes` is passed, you confirm or revise that list.
+
+Every implementation turn must end with exactly one marker on the final
+non-empty line:
+
+```txt
+STEP_STATUS: done | ticket="T001" summary="implemented health check" next="document command"
+STEP_STATUS: blocked | ticket="T001" reason="missing DATABASE_URL"
+STEP_STATUS: plan_complete | ticket="T001" summary="all requested work is complete"
+STEP_STATUS: needs_input | question="Which storage backend?" choices="SQLite|Postgres"
+```
+
+When QA is enabled, Foreman asks the builder to review its own work:
+
+```txt
+STEP_STATUS: qa_pass | summary="tests pass and acceptance criteria are met"
+STEP_STATUS: qa_fail | issues="missing test for empty config"
+```
+
+If QA fails, Foreman sends a fix instruction and reruns QA. QA turns do not
+count against `--steps`.
+
+## Permissions
+
+Foreman's permission policy is deterministic. There is no LLM judgment in the
+policy itself.
+
+For Claude, tool requests surfaced through the SDK are classified by the
+project's `foreman.yaml`:
+
+- Tools in `permissions.escalateTools` are denied.
+- File write tools are allowed only when their target stays inside the project,
+  if the SDK surfaces the path to Foreman.
+- Bash is denied if it contains an always-escalate substring.
+- Bash is otherwise allowed only when every chained segment starts with a
+  configured `allowBash` prefix.
+- Unknown tools and unknown Bash commands are denied.
+
+Codex tool calls are not currently intercepted by Foreman. Codex runs under
+`codex exec --sandbox workspace-write`, so Codex safety depends on Codex's own
+sandboxing.
+
+The default config lives in [foreman.yaml](./foreman.yaml). Copy it into a
+project when you need project-specific policy.
+
+## Development
+
+```bash
+pnpm install
+pnpm test
+pnpm typecheck
+pnpm build
+
+pnpm dev -- start ./dummy-project --steps 2
+```
+
+The package publishes a `foreman` binary from `dist/index.js`.
+
+## Current Limitations
+
+- One builder at a time.
+- No daemon or dashboard.
+- Codex tool calls are not intercepted by Foreman's permission policy.
+- `foreman tickets import` is currently a stub.
+- Escalated actions are denied and stop the batch; there is no approve/deny
+  queue yet.

@@ -11,7 +11,13 @@ export interface Classification {
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
 /** Shell operators we split on to vet each segment of a chained command. */
-const SHELL_SPLIT = /&&|\|\||;|\|/;
+const SHELL_SPLIT = /\s*(?:&&|\|\||;|\|)\s*/;
+
+/** Shell features that make a prefix allow-list too easy to bypass. */
+const ESCALATE_SHELL_SYNTAX = [
+  { pattern: /\s\d?>|\s>>|\s</, reason: "shell redirection is not auto-approved" },
+  { pattern: /\$\(|`/, reason: "shell substitution is not auto-approved" },
+];
 
 /**
  * Rules-based permission classifier. No LLM: routine requests are auto-approved,
@@ -61,9 +67,30 @@ export class PermissionPolicy {
     if (hitEscalate) {
       return { decision: "escalate", reason: `command matches "${hitEscalate}"` };
     }
-    // Default: allow. The escalateBash list is the safety net; unlisted commands
-    // are presumed to be ordinary project tooling.
-    return { decision: "allow", reason: "no dangerous pattern matched" };
+
+    const syntax = ESCALATE_SHELL_SYNTAX.find((s) => s.pattern.test(command));
+    if (syntax) {
+      return { decision: "escalate", reason: syntax.reason };
+    }
+
+    const segments = command.split(SHELL_SPLIT).map((s) => s.trim()).filter(Boolean);
+    if (segments.length === 0) {
+      return { decision: "escalate", reason: "empty bash command" };
+    }
+
+    for (const segment of segments) {
+      const allow = this.config.allowBash.find((p) => this.matchesAllowedPrefix(segment, p));
+      if (!allow) {
+        return { decision: "escalate", reason: `command segment is not allow-listed: ${segment}` };
+      }
+    }
+
+    return { decision: "allow", reason: "all command segments are allow-listed" };
+  }
+
+  private matchesAllowedPrefix(command: string, prefix: string): boolean {
+    if (prefix.endsWith(" ")) return command.startsWith(prefix);
+    return command === prefix || command.startsWith(prefix + " ");
   }
 
   private filePath(input: Record<string, unknown>): string | undefined {

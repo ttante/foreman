@@ -3,6 +3,14 @@
   "version": "0.2.0",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ttante/foreman.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ttante/foreman/issues"
+  },
+  "homepage": "https://github.com/ttante/foreman#readme",
   "bin": {
     "foreman": "./dist/index.js"
   },
@@ -30,8 +38,7 @@
     "cli"
   ],
   "engines": {
-    "node": ">=20",
-    "pnpm": ">=10"
+    "node": ">=20"
   },
   "packageManager": "pnpm@10.2.1",
   "pnpm": {

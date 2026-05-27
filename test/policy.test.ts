@@ -40,15 +40,36 @@ test("escalates risky bash commands", () => {
   );
 });
 
-test("allows unrecognized bash commands not in the escalate list", () => {
-  // escalateBash is the safety net; anything not on it is presumed safe project tooling
+test("escalates unrecognized bash commands", () => {
   assert.equal(
     policy.classify({ toolName: "Bash", input: { command: "frobnicate --all" } }).decision,
-    "allow",
+    "escalate",
   );
   assert.equal(
     policy.classify({ toolName: "Bash", input: { command: "echo hello && ls" } }).decision,
+    "escalate",
+  );
+});
+
+test("allows chained bash only when every segment is allow-listed", () => {
+  assert.equal(
+    policy.classify({ toolName: "Bash", input: { command: "ls -la && cat package.json" } }).decision,
     "allow",
+  );
+  assert.equal(
+    policy.classify({ toolName: "Bash", input: { command: "npm test | frobnicate --all" } }).decision,
+    "escalate",
+  );
+});
+
+test("escalates shell redirection and substitution", () => {
+  assert.equal(
+    policy.classify({ toolName: "Bash", input: { command: "npm test > output.log" } }).decision,
+    "escalate",
+  );
+  assert.equal(
+    policy.classify({ toolName: "Bash", input: { command: "npm test $(cat args.txt)" } }).decision,
+    "escalate",
   );
 });
 
@@ -90,6 +111,28 @@ test("parseStepStatus reads the marker line", () => {
 
   assert.equal(parseStepStatus("no marker here").kind, "unknown");
   assert.equal(parseStepStatus("STEP_STATUS: plan_complete").kind, "plan_complete");
+});
+
+test("parseStepStatus requires one marker on the final non-empty line", () => {
+  const trailing = parseStepStatus('STEP_STATUS: done | summary="did x"\nextra text');
+  assert.equal(trailing.kind, "unknown");
+  assert.match(trailing.error ?? "", /final/);
+
+  const duplicate = parseStepStatus(
+    'STEP_STATUS: done | summary="one"\nSTEP_STATUS: done | summary="two"',
+  );
+  assert.equal(duplicate.kind, "unknown");
+  assert.match(duplicate.error ?? "", /multiple/);
+});
+
+test("parseStepStatus handles escaped quotes and rejects malformed fields", () => {
+  const escaped = parseStepStatus('STEP_STATUS: done | summary="added \\"quoted\\" label"');
+  assert.equal(escaped.kind, "done");
+  assert.equal(escaped.summary, 'added "quoted" label');
+
+  const malformed = parseStepStatus('STEP_STATUS: done | summary="unterminated');
+  assert.equal(malformed.kind, "unknown");
+  assert.match(malformed.error ?? "", /unterminated/);
 });
 
 test("parseStepStatus parses needs_input with question and choices", () => {

@@ -1,5 +1,15 @@
 import { Command } from "commander";
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { select, isCancel } from "@clack/prompts";
+import { loadConfig } from "../config.js";
+import { Log } from "../log.js";
+import { PermissionPolicy } from "../permissions/policy.js";
+import { ClaudeAdapter } from "../adapters/claude.js";
+import { CodexAdapter } from "../adapters/codex.js";
+import { Foreman, createPermissionHandler } from "../foreman.js";
+import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
+import { printEvents } from "./events.js";
 import {
   cmdInit,
   cmdUpdate,
@@ -15,6 +25,7 @@ import {
   cmdQueue,
   cmdArchive,
 } from "../tickets/commands.js";
+import { isTicketsInitialized } from "../tickets/config.js";
 import { importFromMarkdown } from "../tickets/importer.js";
 import { formatValidationIssues } from "../tickets/validate.js";
 
@@ -25,6 +36,64 @@ function fail(msg: string): never {
 
 function cwd(opts: { project?: string }): string {
   return resolve(opts.project ?? ".");
+}
+
+const VALID_AGENTS = ["claude", "codex"] as const;
+const VALID_EFFORT = ["low", "medium", "high", "xhigh"] as const;
+
+function validateAgent(agent: string): asserts agent is typeof VALID_AGENTS[number] {
+  if (!VALID_AGENTS.includes(agent as typeof VALID_AGENTS[number])) {
+    fail(`unknown agent "${agent}" — choose: ${VALID_AGENTS.join(" | ")}`);
+  }
+}
+
+function validateEffort(effort: string | undefined): asserts effort is EffortLevel | undefined {
+  if (effort && !VALID_EFFORT.includes(effort as EffortLevel)) {
+    fail(`unknown effort "${effort}" — choose: ${VALID_EFFORT.join(" | ")}`);
+  }
+}
+
+function makeLogPath(projectDir: string, label: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return join(projectDir, ".foreman", `${stamp}-${label}.jsonl`);
+}
+
+export function buildPopulateInstruction(): string {
+  return `You are being run by Foreman to populate this repository's Foreman ticket tracker.
+
+Goal:
+- Convert every existing project ticket, task, backlog item, roadmap item, or implementation step into Foreman's structured ticket system.
+- Do not implement product/code changes. Only update ticket-tracker files.
+
+Read these files first:
+- .tickets/config.yaml
+- .tickets/tickets.yaml
+- .tickets/tracker-rules.md
+- docs/ticket-progress.md if it exists
+
+Then inspect the repository for existing planning sources. Check root and docs-style Markdown/YAML/TXT files whose names suggest tickets, backlog, roadmap, plan, TODOs, milestones, progress, specs, phases, or implementation steps. Preserve every ticket or task you find. Do not leave out details.
+
+Write the canonical ticket definitions to .tickets/tickets.yaml using Foreman's schema:
+- id: stable ticket ID. Preserve existing IDs. If no IDs exist, assign T001, T002, ... in implementation order.
+- order: unique numeric implementation order. Use gaps like 1000, 2000, 3000.
+- title, area, priority, size, risk, depends_on, summary, acceptance, required_tests, likely_files, rollback, notes.
+- Keep dependencies, acceptance criteria, testing expectations, file hints, risk notes, and implementation notes from the source material.
+- Do not store mutable status/progress fields in .tickets/tickets.yaml.
+- Do not edit .tickets/ticket-state.sqlite directly.
+
+If source content does not cleanly map to the new schema, ask for guidance instead of guessing. Use:
+STEP_STATUS: needs_input | question="..." choices="..."
+
+After editing:
+- Run foreman tickets render.
+- Run foreman tickets validate.
+- Fix validation errors if possible.
+- Triple-check that every source ticket/task is represented exactly once and no important detail was dropped.
+
+End with exactly one marker line as the final non-empty line:
+STEP_STATUS: done | summary="populated Foreman tickets from existing project ticket sources"
+or
+STEP_STATUS: blocked | reason="why ticket population cannot proceed"`;
 }
 
 export function buildTicketsCommand(): Command {
@@ -52,6 +121,105 @@ export function buildTicketsCommand(): Command {
         console.log(`foreman tickets: initialized .tickets/ in ${dir}`);
         console.log(`foreman tickets: next — add tickets to .tickets/tickets.yaml and run \`foreman tickets render\``);
       } catch (err) {
+        fail(String(err instanceof Error ? err.message : err));
+      }
+    });
+
+  // ── populate ────────────────────────────────────────────────────────────────
+
+  tickets
+    .command("populate")
+    .description("Ask a builder to populate .tickets/tickets.yaml from existing project ticket/backlog docs.")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("-a, --agent <agent>", "builder agent (claude | codex)", "claude")
+    .option("-m, --model <model>", "override the builder's model")
+    .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
+    .option("--fast", "fast mode - lower latency")
+    .option("-y, --yes", "skip confirmation prompt before letting the builder edit tickets")
+    .action(async (opts) => {
+      const dir = cwd(opts);
+      const agent = opts.agent as string;
+      validateAgent(agent);
+      validateEffort(opts.effort as string | undefined);
+
+      if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
+      if (!isTicketsInitialized(dir)) {
+        fail(`ticket tracker is not initialized in ${dir}; run \`foreman tickets init --project ${dir}\` first`);
+      }
+
+      if (!opts.yes) {
+        const action = await select({
+          message: "Populate .tickets/tickets.yaml by letting the builder edit this project?",
+          options: [
+            { value: "proceed", label: "Proceed - builder may edit ticket files" },
+            { value: "cancel", label: "Cancel" },
+          ],
+        });
+        if (isCancel(action) || action === "cancel") {
+          console.log("foreman tickets: cancelled");
+          process.exit(0);
+        }
+      }
+
+      const config = loadConfig(join(dir, "foreman.yaml"));
+      const logPath = makeLogPath(dir, "tickets-populate");
+      const log = new Log(logPath);
+      const policy = new PermissionPolicy(config.permissions, dir);
+      const adapterOpts = {
+        cwd: dir,
+        model: opts.model as string | undefined,
+        permission: createPermissionHandler(policy, log),
+        effort: opts.effort as EffortLevel | undefined,
+        fast: opts.fast as boolean | undefined,
+      };
+      const builder: BuilderAdapter =
+        agent === "codex"
+          ? new CodexAdapter(adapterOpts)
+          : new ClaudeAdapter(adapterOpts);
+      const viewer = printEvents(builder.events());
+      const foreman = new Foreman(builder, log, config.notifications.enabled, false, 3, dir);
+
+      console.log(`foreman tickets: populating tickets with ${agent}`);
+      console.log(`foreman tickets: project ${dir}`);
+      console.log(`foreman tickets: log ${logPath}\n`);
+
+      try {
+        const turn = await foreman.runInstruction(buildPopulateInstruction());
+        await builder.close();
+        await viewer;
+
+        log.write("ticket-populate", {
+          statusKind: turn.status.kind,
+          summary: turn.status.summary,
+          reason: turn.status.reason,
+          costUsd: turn.result.costUsd,
+          isError: turn.result.isError,
+        });
+
+        if (turn.result.isError) {
+          fail(`builder turn errored: ${turn.result.text.slice(0, 200)}`);
+        }
+        if (turn.status.kind === "blocked") {
+          console.error(`foreman tickets: blocked — ${turn.status.reason ?? "builder reported blocked"}`);
+          process.exit(2);
+        }
+        if (turn.status.kind !== "done" && turn.status.kind !== "plan_complete") {
+          console.error(`foreman tickets: needs human — ${turn.status.error ?? "builder did not emit done"}`);
+          process.exit(2);
+        }
+
+        cmdRender(dir);
+        const validation = cmdValidate(dir);
+        if (validation.issues.length > 0) {
+          console.log(`foreman tickets: ${validation.issues.length} validation issue(s) found:`);
+          console.log(formatValidationIssues(validation.issues));
+          if (!validation.clean) process.exit(1);
+        } else {
+          console.log("foreman tickets: validation passed — all 4 passes clean");
+        }
+        console.log("foreman tickets: populated .tickets/tickets.yaml and rendered docs/ticket-progress.md");
+      } catch (err) {
+        await builder.close().catch(() => {});
         fail(String(err instanceof Error ? err.message : err));
       }
     });

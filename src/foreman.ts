@@ -29,6 +29,7 @@ export interface StepStatus {
   choices?: string[];
   issues?: string;
   ticket?: string;
+  error?: string;
 }
 
 /** Phrases that suggest the builder ended its turn by asking the human. */
@@ -47,14 +48,29 @@ const QUESTION_HINTS = [
  * Format: `STEP_STATUS: <kind> | key="value" key="value"`.
  */
 export function parseStepStatus(text: string): StepStatus {
-  const match = text.match(
-    /STEP_STATUS:\s*(done|blocked|plan_complete|needs_input|qa_pass|qa_fail)\b(.*)$/im,
+  const markerCount = (text.match(/STEP_STATUS:/g) ?? []).length;
+  if (markerCount > 1) {
+    return { kind: "unknown", error: "builder emitted multiple STEP_STATUS markers" };
+  }
+  const lines = text.trimEnd().split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const last = lines[lines.length - 1] ?? "";
+  if (!last.includes("STEP_STATUS:")) {
+    if (markerCount === 1) {
+      return { kind: "unknown", error: "STEP_STATUS marker was not the final non-empty line" };
+    }
+    return { kind: "unknown" };
+  }
+
+  const match = last.match(
+    /^STEP_STATUS:\s*(done|blocked|plan_complete|needs_input|qa_pass|qa_fail)\b\s*(?:\|\s*(.*))?$/i,
   );
-  if (!match) return { kind: "unknown" };
+  if (!match) {
+    return { kind: "unknown", error: "malformed STEP_STATUS marker" };
+  }
   const kind = match[1].toLowerCase() as StepStatus["kind"];
-  const fields: Record<string, string> = {};
-  for (const kv of match[2].matchAll(/(\w+)="([^"]*)"/g)) {
-    fields[kv[1]] = kv[2];
+  const fields = parseMarkerFields(match[2] ?? "");
+  if (fields instanceof Error) {
+    return { kind: "unknown", error: fields.message };
   }
   return {
     kind,
@@ -68,6 +84,41 @@ export function parseStepStatus(text: string): StepStatus {
       ? fields.choices.split("|").map((c) => c.trim()).filter(Boolean)
       : undefined,
   };
+}
+
+function parseMarkerFields(input: string): Record<string, string> | Error {
+  const fields: Record<string, string> = {};
+  let rest = input.trim();
+  while (rest.length > 0) {
+    const key = rest.match(/^(\w+)="/);
+    if (!key) return new Error(`malformed STEP_STATUS field near: ${rest.slice(0, 40)}`);
+    const name = key[1];
+    let i = key[0].length;
+    let value = "";
+    let closed = false;
+    while (i < rest.length) {
+      const ch = rest[i];
+      if (ch === "\\") {
+        const next = rest[i + 1];
+        if (next === undefined) return new Error(`unterminated escape in STEP_STATUS field: ${name}`);
+        value += next;
+        i += 2;
+        continue;
+      }
+      if (ch === "\"") {
+        closed = true;
+        i++;
+        break;
+      }
+      value += ch;
+      i++;
+    }
+    if (!closed) return new Error(`unterminated STEP_STATUS field: ${name}`);
+    if (fields[name] !== undefined) return new Error(`duplicate STEP_STATUS field: ${name}`);
+    fields[name] = value;
+    rest = rest.slice(i).trim();
+  }
+  return fields;
 }
 
 /** Heuristic: did a marker-less turn end by asking the human something? */
@@ -267,6 +318,13 @@ export class Foreman {
     this.log.write("preflight", { feedback: true, costUsd: result.costUsd });
   }
 
+  /** Send one custom instruction through the same needs_input loop as a batch turn. */
+  async runInstruction(
+    instruction: string,
+  ): Promise<{ result: TurnResult; status: StepStatus }> {
+    return this.doTurn(instruction);
+  }
+
   /**
    * Run a QA review pass on the ticket the builder just completed.
    * Loops on qa_fail → fix → re-QA until qa_pass or the cycle cap is reached.
@@ -275,6 +333,7 @@ export class Foreman {
   private async runQa(stepIndex: number): Promise<{
     outcome: "passed" | "blocked" | "needs-human";
     detail?: string;
+    summary?: string;
   }> {
     for (let cycle = 1; cycle <= this.qaMaxCycles; cycle++) {
       const qa = await this.doTurn(buildQaInstruction());
@@ -290,14 +349,16 @@ export class Foreman {
       if (qa.result.isError) {
         return { outcome: "blocked", detail: `QA turn errored: ${qa.result.text.slice(0, 200)}` };
       }
-      if (qa.status.kind === "qa_pass") return { outcome: "passed" };
+      if (qa.status.kind === "qa_pass") {
+        return { outcome: "passed", summary: qa.status.summary };
+      }
       if (qa.status.kind === "blocked") {
         return { outcome: "blocked", detail: qa.status.reason ?? "QA reported blocked" };
       }
       if (qa.status.kind !== "qa_fail") {
         return {
           outcome: "needs-human",
-          detail: `QA turn did not emit a valid marker (got ${qa.status.kind})`,
+          detail: qa.status.error ?? `QA turn did not emit a valid marker (got ${qa.status.kind})`,
         };
       }
 
@@ -321,7 +382,7 @@ export class Foreman {
       if (fix.status.kind !== "done") {
         return {
           outcome: "needs-human",
-          detail: `QA fix turn did not emit done (got ${fix.status.kind})`,
+          detail: fix.status.error ?? `QA fix turn did not emit done (got ${fix.status.kind})`,
         };
       }
       // loop back into QA
@@ -353,8 +414,10 @@ export class Foreman {
               summary: `Starting step ${i} of ${n}`,
             });
           }
-        } catch {
-          // Tickets integration failure should not stop the build
+        } catch (err) {
+          outcome = "needs-human";
+          detail = `failed to update ticket tracker before step ${i}: ${err instanceof Error ? err.message : String(err)}`;
+          break;
         }
       }
 
@@ -381,23 +444,7 @@ export class Foreman {
       }
 
       if (status.kind === "done" || status.kind === "plan_complete") {
-        // Update ticket state via the tracker
-        if (this.ticketsEnabled && this.projectDir) {
-          const ticketId = status.ticket ?? pendingTicketId;
-          if (ticketId) {
-            try {
-              cmdComplete(this.projectDir, ticketId, {
-                actor: "foreman",
-                summary: status.summary ?? `Step ${i} complete`,
-                validationResult: "not_run",
-                validationNotes: "QA will follow if enabled",
-              });
-            } catch {
-              // Non-fatal: don't block the build if tracker update fails
-            }
-          }
-        }
-
+        let qaSummary: string | undefined;
         if (this.qaEnabled) {
           const qa = await this.runQa(i);
           if (qa.outcome === "blocked") {
@@ -409,6 +456,32 @@ export class Foreman {
             outcome = "needs-human";
             detail = qa.detail;
             break;
+          }
+          qaSummary = qa.summary;
+        }
+
+        // Update ticket state only after QA has passed, so generated tracker
+        // state does not claim done before verification has completed.
+        if (this.ticketsEnabled && this.projectDir) {
+          const ticketId = status.ticket ?? pendingTicketId;
+          if (ticketId) {
+            try {
+              cmdComplete(this.projectDir, ticketId, {
+                actor: "foreman",
+                summary: status.summary ?? `Step ${i} complete`,
+                validationResult: this.qaEnabled ? "passed" : "not_applicable",
+                validationNotes: this.qaEnabled
+                  ? "Foreman QA emitted qa_pass"
+                  : "Foreman QA disabled for this run",
+                evidence: this.qaEnabled
+                  ? (qaSummary ?? "Foreman QA emitted qa_pass")
+                  : undefined,
+              });
+            } catch (err) {
+              outcome = "needs-human";
+              detail = `failed to complete ticket ${ticketId}: ${err instanceof Error ? err.message : String(err)}`;
+              break;
+            }
           }
         }
         completed++;
@@ -430,19 +503,23 @@ export class Foreman {
                 summary: status.reason ?? "builder reported blocked",
                 actor: "foreman",
               });
-            } catch {
-              // Non-fatal
+            } catch (err) {
+              detail =
+                `${status.reason ?? "builder reported blocked"}; failed to update ticket tracker: ` +
+                `${err instanceof Error ? err.message : String(err)}`;
             }
           }
         }
         outcome = "blocked";
-        detail = status.reason ?? "builder reported blocked";
+        detail = detail ?? status.reason ?? "builder reported blocked";
         break;
       }
 
       // No marker: treat as a blocker so we never loop blindly.
       outcome = "needs-human";
-      detail = looksLikeQuestion(result.text)
+      detail = status.error
+        ? status.error
+        : looksLikeQuestion(result.text)
         ? `builder ended with a question: ${lastLine(result.text)}`
         : "builder did not emit a STEP_STATUS marker";
       break;
