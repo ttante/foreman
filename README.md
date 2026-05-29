@@ -10,11 +10,37 @@ Loop Claude Code or Codex through tickets.
 
 ## Install
 
+Global install:
+
 ```bash
 npm install -g foreman-cli
 ```
 
+Helpful when:
+
+- You want `foreman` available from any repo.
+- You use Foreman across multiple projects.
+- You do not need each repo to pin its own Foreman version.
+
+Per-project install:
+
+```bash
+npm install --save-dev foreman-cli
+npx foreman doctor .
+```
+
+Helpful when:
+
+- You prefer `npx foreman` over a global CLI.
+- You want Foreman tracked in `package.json`.
+- You want teammates or CI to use the repo's installed version.
+
+Requires:
+
+- Node.js 20 or newer.
+
 ## Use
+
 - Check the target project.
 - Initialize Foreman's local ticket tracker.
 - Ask agent to convert existing tickets or populate them
@@ -42,102 +68,81 @@ What each part does:
 - roadmap docs
 - ticket files
 
-Useful options:
+## Primary Options
 
-- `--model gpt-5.5`: selects the builder model.
-- `--effort xhigh`: sets the reasoning level for agents that support it.
-- `--yes`: skips confirmation prompts in scripted workflows.
+### `foreman start`
 
-These options work with:
+| Option | Common values | Default | Notes |
+| --- | --- | --- | --- |
+| `<project>` | `./my-project` / `../repo` | required | Target repo the agent works in. |
+| `-s, --steps <n>` | `1` / `5` / `10` | required | Max tickets or implementation steps to drive. |
+| `-a, --agent <agent>` | `claude` / `codex` | `claude` | Builder agent. |
+| `-m, --model <model>` | `gpt-5.5` / any supported agent model | agent default | Overrides the builder model. |
+| `--effort <level>` | Claude Code: `low` / `medium` / `high` / `xhigh`<br>Codex: `low` / `medium` / `high` / `xhigh` | agent default | Reasoning level. |
+| `--fast` | flag | off | Lower latency. For Codex, maps to `effort=low` when `--effort` is not set. |
+| `-t, --tickets <path>` | `.md` / `.txt` / `.yaml` | auto-detects standard tracker files | Sends a task file to the builder during preflight planning. |
+| `-y, --yes` | flag | off | Skips preflight confirmation. |
+| `--no-qa` | flag | QA on | Disables per-ticket QA review. |
+| `--continue` | flag | off | Resumes the most recent logged session. |
+| `-r, --resume <sessionId>` | session ID from `.foreman/` logs | none | Resumes a specific Claude/Codex session. |
 
-- `tickets populate`
-- `start`
+Auto-detected tracker files:
 
-## Install Options
+- `docs/ticket-progress.md`
+- `ticket-progress.md`
 
-Global install:
+Resume rule:
 
-- Best for personal use.
+- Use either `--continue` or `--resume`.
+- Do not use both in the same command.
 
-```bash
-npm install -g foreman-cli
-```
+### `foreman tickets populate`
 
-Per-project install:
-
-- Best when a repo wants a pinned Foreman version.
-
-```bash
-npm install --save-dev foreman-cli
-npx foreman doctor .
-```
-
-Runtime requirement:
-
-- Node.js 20 or newer.
+| Option | Common values | Default | Notes |
+| --- | --- | --- | --- |
+| `-p, --project <dir>` | `./my-project` / `../repo` | current directory | Target repo with `.tickets/`. |
+| `-a, --agent <agent>` | `claude` / `codex` | `claude` | Builder agent. |
+| `-m, --model <model>` | `gpt-5.5` / any supported agent model | agent default | Overrides the builder model. |
+| `--effort <level>` | Claude Code: `low` / `medium` / `high` / `xhigh`<br>Codex: `low` / `medium` / `high` / `xhigh` | agent default | Reasoning level. |
+| `--fast` | flag | off | Lower latency. |
+| `-y, --yes` | flag | off | Skips confirmation before builder edits ticket files. |
 
 ## What Foreman Does
 
-Foreman can:
+During a run, Foreman:
 
-- Ask the builder for a short plan.
-- Send one implementation step at a time.
-- Require a final `STEP_STATUS` marker.
-- Run QA after each completed step.
-- Write a JSONL log under `.foreman/`.
+- asks the builder for a short plan
+- sends one ticket or implementation step at a time
+- requires a final `STEP_STATUS` marker
+- runs QA after each completed step by default
+- writes a JSONL log under `.foreman/`
 
-For ongoing work, Foreman can maintain a tracker.
+When `.tickets/config.yaml` exists, Foreman also:
 
-- Tracker path: `.tickets/` in the target project.
+- uses the local ticket tracker automatically
+- marks the first eligible queue row `in_progress`
+- marks the ticket `done` only after QA passes
 
-The tracker gives one source of truth to:
-
-- Foreman
-- the builder
-- humans
-
-It covers:
-
-- what exists
-- what comes next
-- what is blocked
-- what has already been validated
-
-You can also run Foreman with:
+Without tickets, Foreman still works with:
 
 - a one-off task file
-- no ticket tracker at all
+- a plain project directory
 
-The ticket tools are for projects that need durable shared context.
+## Agents And Task Files
 
-## Agent Examples
+Claude Code:
 
-### Claude Code
+- Default agent.
+- Uses your existing Claude Code credentials.
+- Runs through the Claude Agent SDK.
 
-```bash
-foreman doctor ./my-project
-foreman start ./my-project --steps 5
-```
+Codex:
 
-Notes:
+- Use `--agent codex`.
+- Shells out to `codex exec`.
+- Requires the `codex` CLI on your `PATH`.
 
-- Claude is the default agent.
-- The Claude adapter uses your existing Claude Code credentials.
-- Authentication runs through the Claude Agent SDK.
-
-### Codex
-
-```bash
-foreman doctor ./my-project
-foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 5
-```
-
-Notes:
-
-- The Codex adapter shells out to `codex exec`.
-- The `codex` CLI must be on your `PATH`.
-
-### With A Task File
+Task file:
 
 ```bash
 foreman start ./my-project --steps 5 --tickets ./my-project/TICKETS.md
@@ -178,6 +183,15 @@ From inside the project:
 ```bash
 foreman tickets init --app-name "My App"
 ```
+
+Init options:
+
+| Option | Common values | Default | Notes |
+| --- | --- | --- | --- |
+| `-p, --project <dir>` | `./my-project` / `../repo` | current directory | Project to initialize. |
+| `--app-name <name>` | `"My App"` | none | Application name stored in tracker config. |
+| `--timezone <tz>` | `America/Chicago` / `UTC` | `UTC` | IANA timezone. |
+| `--queue-limit <n>` | `25` / `50` / `100` | `50` | Next-queue window size. |
 
 This creates:
 
@@ -347,37 +361,16 @@ Codex:
 foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 10
 ```
 
-When `.tickets/config.yaml` exists, Foreman automatically uses that tracker.
-
-Foreman then:
-
-- marks the first eligible queue row `in_progress`
-- drives one step
-- runs QA if enabled
-- marks the ticket `done` only after QA passes
-
 ## Common Commands
 
 ```bash
 # Check environment and config
 foreman doctor ./my-project
 
-# Start fresh with Claude
-foreman start ./my-project --steps 5
-
-# Start fresh with Codex
-foreman start ./my-project --agent codex --steps 5
-
-# Start Codex with a specific model and reasoning level
-foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 5
-
-# Skip the preflight confirmation prompt
-foreman start ./my-project --steps 5 --yes
-
 # Disable per-step QA
 foreman start ./my-project --steps 5 --no-qa
 
-# Resume the latest logged session
+# Resume the latest session
 foreman start ./my-project --steps 5 --continue
 
 # Resume a specific session
@@ -389,21 +382,6 @@ foreman status ./my-project
 # Show the next ticket queue
 foreman tickets queue --project ./my-project
 ```
-
-## Common Options
-
-| Option | Example | Description |
-| --- | --- | --- |
-| `--steps <n>` | `--steps 10` | Number of implementation steps to drive. Required. |
-| `--agent <agent>` | `--agent codex` | `claude` by default, or `codex`. |
-| `--tickets <path>` | `--tickets TICKETS.md` | Send a task file into preflight planning. |
-| `--yes` | `--yes` | Skip preflight confirmation. Useful for scripts. |
-| `--no-qa` | `--no-qa` | Disable QA pass after each completed step. |
-| `--continue` | `--continue` | Resume the most recent session logged in `.foreman/`. |
-| `--resume <id>` | `--resume abc123` | Resume a specific Claude/Codex session. |
-| `--model <model>` | `--model gpt-5.5` | Override the agent model. |
-| `--effort <level>` | `--effort xhigh` | Reasoning level: `low` / `medium` / `high` / `xhigh`. |
-| `--fast` | `--fast` | Lower-latency mode where supported. |
 
 ## Ticket Commands
 
@@ -424,6 +402,7 @@ foreman tickets render --project ./my-project
 
 # Print the current queue
 foreman tickets queue --project ./my-project
+foreman tickets queue --project ./my-project --limit 10
 
 # Update a ticket note or status
 foreman tickets update T001 --project ./my-project --next-action "Add tests"
@@ -437,9 +416,23 @@ foreman tickets unblock T001 --project ./my-project --summary "API key received"
 
 # Capture future work discovered during implementation
 foreman tickets discover --project ./my-project --summary "Add retry metrics" --rationale "Needed for operations"
-```
 
-`foreman tickets import` exists as a placeholder and is not implemented yet.
+# Cancel a ticket
+foreman tickets cancel T001 --project ./my-project --summary "Superseded by T002"
+
+# Promote discovered future work into tickets.yaml
+foreman tickets accept-future-work 1 --project ./my-project --ticket-id T051 --order 51000
+
+# Reorder a ticket
+foreman tickets reorder T051 --project ./my-project --after T050
+foreman tickets reorder T051 --project ./my-project --order 51000
+
+# Archive old completed tickets
+foreman tickets archive --project ./my-project --older-than-days 30
+
+# Import is a placeholder
+foreman tickets import --project ./my-project --progress docs/ticket-progress.md
+```
 
 ## How The Loop Works
 
